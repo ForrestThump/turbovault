@@ -206,8 +206,7 @@ impl Default for ObsidianMcpServer {
 
 #[turbomcp::server(
     name = "obsidian-vault",
-    version = "1.1.6",
-    transports = ["stdio", "http", "websocket", "tcp", "unix"]
+    version = "1.1.6"
 )]
 impl ObsidianMcpServer {
     /// Get a vault manager for the currently active vault (cached)
@@ -328,7 +327,7 @@ impl ObsidianMcpServer {
                 "note": "Use MCP resources if supported by client, otherwise use tools as fallback",
                 "key_features": [
                     "Wikilinks: [[note]] and [[note|alias]]",
-                    "Embeds: ![[image.png]] and ![[note#section]]",
+                    "Embeds: ![[image.png]] and ![[noteection]]",
                     "Block refs: [[note#^block-id]] and ^block-id",
                     "Callouts: > [!note] Title",
                     "Highlights: ==text==",
@@ -415,7 +414,11 @@ impl ObsidianMcpServer {
         related = ["read_note", "edit_note", "create_from_template"],
         examples = ["meeting-notes/2024-01-15.md", "references/api-documentation.md"]
     )]
-    async fn write_note(&self, path: String, content: String) -> McpResult<serde_json::Value> {
+    async fn write_note(
+        &self,
+        path: String,
+        content: String,
+    ) -> McpResult<serde_json::Value> {
         let (vault_name, manager) = self.get_vault_pair().await?;
         let tools = FileTools::new(manager);
         tools
@@ -472,7 +475,10 @@ impl ObsidianMcpServer {
         related = ["get_backlinks", "get_broken_links", "move_note"],
         examples = ["drafts/old-idea.md", "archive/2023/deprecated-process.md"]
     )]
-    async fn delete_note(&self, path: String) -> McpResult<serde_json::Value> {
+    async fn delete_note(
+        &self,
+        path: String,
+    ) -> McpResult<serde_json::Value> {
         let (vault_name, manager) = self.get_vault_pair().await?;
         let tools = FileTools::new(manager);
         tools.delete_file(&path).await.map_err(to_mcp_error)?;
@@ -494,7 +500,11 @@ impl ObsidianMcpServer {
         related = ["get_backlinks", "get_forward_links", "search"],
         examples = []
     )]
-    async fn move_note(&self, from: String, to: String) -> McpResult<serde_json::Value> {
+    async fn move_note(
+        &self,
+        from: String,
+        to: String,
+    ) -> McpResult<serde_json::Value> {
         let (vault_name, manager) = self.get_vault_pair().await?;
         let tools = FileTools::new(manager);
         tools.move_file(&from, &to).await.map_err(to_mcp_error)?;
@@ -518,7 +528,10 @@ impl ObsidianMcpServer {
         related = ["get_forward_links", "get_related_notes", "get_hub_notes"],
         examples = []
     )]
-    async fn get_backlinks(&self, path: String) -> McpResult<serde_json::Value> {
+    async fn get_backlinks(
+        &self,
+        path: String,
+    ) -> McpResult<serde_json::Value> {
         let (vault_name, manager) = self.get_vault_pair().await?;
         let tools = SearchTools::new(manager);
         let backlinks = tools.find_backlinks(&path).await.map_err(to_mcp_error)?;
@@ -547,7 +560,10 @@ impl ObsidianMcpServer {
         related = ["get_backlinks", "get_related_notes", "get_broken_links"],
         examples = []
     )]
-    async fn get_forward_links(&self, path: String) -> McpResult<serde_json::Value> {
+    async fn get_forward_links(
+        &self,
+        path: String,
+    ) -> McpResult<serde_json::Value> {
         let (vault_name, manager) = self.get_vault_pair().await?;
         let tools = SearchTools::new(manager);
         let links = tools
@@ -918,7 +934,10 @@ impl ObsidianMcpServer {
         related = ["advanced_search", "recommend_related", "query_metadata"],
         examples = ["\"project alpha\"", "authentication", "urgent tasks"]
     )]
-    async fn search(&self, query: String) -> McpResult<serde_json::Value> {
+    async fn search(
+        &self,
+        query: String,
+    ) -> McpResult<serde_json::Value> {
         let (vault_name, manager) = self.get_vault_pair().await?;
         let engine = SearchEngine::new(manager).await.map_err(to_mcp_error)?;
         let results = engine.search(&query).await.map_err(to_mcp_error)?;
@@ -1030,7 +1049,10 @@ impl ObsidianMcpServer {
         related = ["list_templates", "create_from_template", "find_notes_from_template"],
         examples = ["Get daily-note template to see required fields", "Preview meeting-notes template structure"]
     )]
-    async fn get_template(&self, template_id: String) -> McpResult<serde_json::Value> {
+    async fn get_template(
+        &self,
+        template_id: String,
+    ) -> McpResult<serde_json::Value> {
         let (vault_name, manager) = self.get_vault_pair().await?;
         let engine = TemplateEngine::new(manager);
         let template = engine
@@ -1092,7 +1114,10 @@ impl ObsidianMcpServer {
         related = ["query_metadata", "get_template", "advanced_search", "create_from_template"],
         examples = ["Find all daily notes from template", "List meeting notes to bulk update", "Audit project note usage"]
     )]
-    async fn find_notes_from_template(&self, template_id: String) -> McpResult<serde_json::Value> {
+    async fn find_notes_from_template(
+        &self,
+        template_id: String,
+    ) -> McpResult<serde_json::Value> {
         let (vault_name, manager) = self.get_vault_pair().await?;
         let engine = TemplateEngine::new(manager);
         let notes = engine
@@ -1153,7 +1178,11 @@ impl ObsidianMcpServer {
         related = ["list_vaults", "set_active_vault", "get_vault_context"],
         examples = ["Add personal vault", "Register work vault", "Connect to shared knowledge base"]
     )]
-    async fn add_vault(&self, name: String, path: String) -> McpResult<serde_json::Value> {
+    async fn add_vault(
+        &self,
+        name: String,
+        path: String,
+    ) -> McpResult<serde_json::Value> {
         let tools = VaultLifecycleTools::new(self.multi_vault_mgr.clone());
         let vault_info = tools
             .add_vault_from_path(&name, Path::new(&path))
@@ -1680,19 +1709,19 @@ impl ObsidianMcpServer {
 
     /// Complete Obsidian Flavored Markdown syntax guide
     #[resource("obsidian://syntax/complete-guide")]
-    async fn ofm_complete_guide_resource(&self) -> McpResult<String> {
+    async fn ofm_complete_guide_resource(&self, _uri: String, _ctx: &RequestContext) -> McpResult<String> {
         Ok(crate::resources::OFM_SYNTAX_GUIDE.to_string())
     }
 
     /// Quick reference for Obsidian Flavored Markdown
     #[resource("obsidian://syntax/quick-ref")]
-    async fn ofm_quick_reference_resource(&self) -> McpResult<String> {
+    async fn ofm_quick_reference_resource(&self, _uri: String, _ctx: &RequestContext) -> McpResult<String> {
         Ok(crate::resources::OFM_QUICK_REFERENCE.to_string())
     }
 
     /// Example note demonstrating all OFM features
     #[resource("obsidian://examples/sample-note")]
-    async fn ofm_example_note_resource(&self) -> McpResult<String> {
+    async fn ofm_example_note_resource(&self, _uri: String, _ctx: &RequestContext) -> McpResult<String> {
         Ok(crate::resources::OFM_EXAMPLE_NOTE.to_string())
     }
 
