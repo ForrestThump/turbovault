@@ -26,6 +26,7 @@ turbomcp = { version = "3.0.0" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
@@ -33,6 +34,7 @@ tracing = { workspace = true }
 tempfile = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 shellexpand = { workspace = true }
+urlencoding = "2"
 
 # Tier 1d: Production-grade full-text search
 tantivy = { workspace = true }

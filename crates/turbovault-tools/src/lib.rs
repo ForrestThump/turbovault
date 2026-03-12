@@ -184,7 +184,7 @@ pub mod vault_lifecycle;
 pub use analysis_tools::{AnalysisTools, VaultStats};
 pub use batch_tools::BatchTools;
 pub use export_tools::ExportTools;
-pub use file_tools::FileTools;
+pub use file_tools::{FileTools, NoteInfo, WriteMode, obsidian_uri};
 pub use graph_tools::{BrokenLinkInfo, GraphTools, HealthInfo};
 pub use metadata_tools::MetadataTools;
 pub use output_formatter::{OutputFormat, ResponseFormatter};

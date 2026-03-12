@@ -12,6 +12,7 @@ use turbovault_core::prelude::MultiVaultManager;
 use turbovault_tools::{
     AnalysisTools, BatchOperation, BatchTools, ExportTools, FileTools, GraphTools, MetadataTools,
     RelationshipTools, SearchEngine, SearchQuery, SearchTools, TemplateEngine, VaultLifecycleTools,
+    WriteMode, obsidian_uri,
 };
 use turbovault_vault::VaultManager;
 
@@ -337,13 +338,13 @@ impl ObsidianMcpServer {
                 ]
             },
             "tools": {
-                "file_operations": ["read_note", "write_note", "delete_note", "move_note"],
+                "file_operations": ["read_note", "write_note", "edit_note", "delete_note", "move_note", "move_file", "get_notes_info"],
                 "search": ["search", "advanced_search", "recommend_related", "find_notes_from_template"],
                 "link_analysis": ["get_backlinks", "get_forward_links", "get_related_notes", "get_hub_notes", "get_dead_end_notes"],
                 "analysis": ["quick_health_check", "full_health_analysis", "get_broken_links", "detect_cycles"],
                 "vault_management": ["add_vault", "list_vaults", "set_active_vault", "get_active_vault"],
                 "templates": ["list_templates", "get_template", "create_from_template", "find_notes_from_template"],
-                "metadata": ["get_metadata_value", "query_metadata"],
+                "metadata": ["get_metadata_value", "query_metadata", "update_frontmatter", "manage_tags"],
                 "batch": ["batch_execute"],
             }
         });
@@ -394,35 +395,43 @@ impl ObsidianMcpServer {
         // Compute hash for use with edit_file
         let hash = turbovault_vault::compute_hash(&content);
 
+        let uri = obsidian_uri(&vault_name, &path);
         StandardResponse::new(
-            vault_name,
+            &vault_name,
             "read_note",
-            serde_json::json!({"path": path, "content": content, "hash": hash}),
+            serde_json::json!({"path": path, "content": content, "hash": hash, "uri": uri}),
         )
         .with_read_next_steps()
         .to_json()
     }
 
-    /// Write or update a note
+    /// Write or update a note with optional mode (overwrite, append, prepend)
     #[tool(
-        description = "Write or overwrite a note in active vault (creates if missing, replaces if exists)",
-        usage = "Use for creating new notes or completely replacing existing ones. Accepts full markdown content with Obsidian Flavored Markdown syntax (wikilinks, callouts, block refs). Automatically creates parent directories and triggers link graph rebuild. For targeted edits, use edit_note instead",
+        description = "Write a note in active vault with mode control: 'overwrite' (default) replaces entire file, 'append' adds to end, 'prepend' adds after frontmatter",
+        usage = "Use for creating new notes, replacing existing ones, or appending/prepending content. Append mode is ideal for daily notes and journals. Prepend inserts after frontmatter if present. Accepts Obsidian Flavored Markdown. For targeted edits, use edit_note instead",
         performance = "Moderate (<50ms typical). Includes filesystem write and link graph update",
         related = ["read_note", "edit_note", "create_from_template"],
-        examples = ["meeting-notes/2024-01-15.md", "references/api-documentation.md"]
+        examples = ["mode: overwrite (default)", "mode: append (add to end)", "mode: prepend (add after frontmatter)"]
     )]
-    async fn write_note(&self, path: String, content: String) -> McpResult<serde_json::Value> {
+    async fn write_note(
+        &self,
+        path: String,
+        content: String,
+        mode: Option<String>,
+    ) -> McpResult<serde_json::Value> {
         let (vault_name, manager) = self.get_vault_pair().await?;
+        let write_mode = WriteMode::from_str_opt(mode.as_deref()).map_err(to_mcp_error)?;
         let tools = FileTools::new(manager);
         tools
-            .write_file(&path, &content)
+            .write_file_with_mode(&path, &content, write_mode)
             .await
             .map_err(to_mcp_error)?;
 
+        let mode_str = mode.as_deref().unwrap_or("overwrite");
         StandardResponse::new(
             vault_name,
             "write_note",
-            serde_json::json!({"path": path, "status": "written", "bytes": content.len()}),
+            serde_json::json!({"path": path, "status": "written", "bytes": content.len(), "mode": mode_str}),
         )
         .with_write_next_steps()
         .to_json()
@@ -460,15 +469,27 @@ impl ObsidianMcpServer {
         .to_json()
     }
 
-    /// Delete a note
+    /// Delete a note (confirmation-protected)
     #[tool(
-        description = "Permanently delete a note from active vault (irreversible)",
-        usage = "Use to remove unwanted notes. Removes file from filesystem and updates link graph. Any links to this note become broken links. Use get_backlinks first to understand impact. Not idempotent (fails if already deleted)",
+        description = "Permanently delete a note from active vault (irreversible, confirmation-protected)",
+        usage = "Use to remove unwanted notes. REQUIRES confirm_path parameter matching path exactly to prevent accidental deletion. Removes file from filesystem and updates link graph. Any links to this note become broken links. Use get_backlinks first to understand impact",
         performance = "Fast (<20ms typical). Includes filesystem delete and link graph update",
         related = ["get_backlinks", "get_broken_links", "move_note"],
-        examples = ["drafts/old-idea.md", "archive/2023/deprecated-process.md"]
+        examples = ["path: drafts/old-idea.md, confirm_path: drafts/old-idea.md"]
     )]
-    async fn delete_note(&self, path: String) -> McpResult<serde_json::Value> {
+    async fn delete_note(
+        &self,
+        path: String,
+        confirm_path: String,
+    ) -> McpResult<serde_json::Value> {
+        // Safety: confirm_path must match path exactly
+        if path != confirm_path {
+            return Err(McpError::invalid_request(format!(
+                "Confirmation failed: confirm_path '{}' does not match path '{}'. Both must be identical to proceed with deletion.",
+                confirm_path, path
+            )));
+        }
+
         let (vault_name, manager) = self.get_vault_pair().await?;
         let tools = FileTools::new(manager);
         tools.delete_file(&path).await.map_err(to_mcp_error)?;
@@ -484,9 +505,9 @@ impl ObsidianMcpServer {
 
     /// Move or rename a note
     #[tool(
-        description = "Move or rename a note within active vault with automatic link updates",
-        usage = "Use to reorganize vault structure or rename notes. Updates all wikilinks pointing to this note across entire vault to preserve graph integrity. May break non-wikilink references (markdown links, embeds with paths). Returns old path, new path, and count of updated references",
-        performance = "Variable (50-500ms depending on backlink count). Scans and updates all referencing files",
+        description = "Move or rename a note within active vault. Does NOT update wikilinks — use get_backlinks first to assess impact",
+        usage = "Use to reorganize vault structure or rename notes. This performs a filesystem move only. Links pointing to the old path will become broken. Always call get_backlinks before moving to understand impact, then manually update references if needed",
+        performance = "Fast (<20ms typical). Filesystem rename, falls back to copy+delete for cross-filesystem moves",
         related = ["get_backlinks", "get_forward_links", "search"],
         examples = []
     )]
@@ -501,6 +522,7 @@ impl ObsidianMcpServer {
             serde_json::json!({"from": from, "to": to, "status": "moved"}),
         )
         .with_next_steps(&["get_backlinks", "get_forward_links"])
+        .with_warning("Links pointing to the old path are now broken. Use get_backlinks and edit_note to update references.")
         .to_json()
     }
 
@@ -1560,6 +1582,145 @@ impl ObsidianMcpServer {
         .with_next_step("query_metadata");
 
         response.to_json()
+    }
+
+    /// Update frontmatter of a note without touching content
+    #[tool(
+        description = "Update YAML frontmatter of a note without modifying content body",
+        usage = "Use to modify note metadata (status, tags, properties) while preserving content. Merge mode (default) deep-merges new keys into existing frontmatter. Replace mode replaces frontmatter entirely",
+        performance = "Fast (<30ms typical). Reads file, modifies frontmatter, writes atomically",
+        related = ["get_metadata_value", "query_metadata", "manage_tags"],
+        examples = [
+            r#"frontmatter: {"status": "published", "priority": 1}, merge: true"#,
+            r#"frontmatter: {"tags": ["work", "urgent"]}, merge: false"#
+        ]
+    )]
+    async fn update_frontmatter(
+        &self,
+        path: String,
+        frontmatter: serde_json::Value,
+        merge: Option<bool>,
+    ) -> McpResult<serde_json::Value> {
+        let (vault_name, manager) = self.get_vault_pair().await?;
+        let tools = MetadataTools::new(manager);
+
+        let fm_map = match frontmatter {
+            serde_json::Value::Object(map) => map,
+            _ => {
+                return Err(McpError::invalid_request(
+                    "frontmatter must be a JSON object".to_string(),
+                ));
+            }
+        };
+
+        let result = tools
+            .update_frontmatter(&path, fm_map, merge.unwrap_or(true))
+            .await
+            .map_err(to_mcp_error)?;
+
+        StandardResponse::new(vault_name, "update_frontmatter", result)
+            .with_next_steps(&["read_note", "query_metadata"])
+            .to_json()
+    }
+
+    /// Manage tags on a note (add, remove, list)
+    #[tool(
+        description = "Add, remove, or list tags on a note. List returns both frontmatter and inline #tags. Add/remove only modify frontmatter tags array",
+        usage = "Use for tag-based organization. 'list' discovers all tags (frontmatter + inline). 'add' creates tags array if missing. 'remove' leaves other tags intact. Tags are normalized (# prefix stripped)",
+        performance = "Fast (<30ms typical). List requires parsing content for inline tags",
+        related = ["update_frontmatter", "query_metadata", "advanced_search"],
+        examples = [
+            "operation: list (returns all tags)",
+            r#"operation: add, tags: ["work", "urgent"]"#,
+            r#"operation: remove, tags: ["draft"]"#
+        ]
+    )]
+    async fn manage_tags(
+        &self,
+        path: String,
+        operation: String,
+        tags: Option<Vec<String>>,
+    ) -> McpResult<serde_json::Value> {
+        let (vault_name, manager) = self.get_vault_pair().await?;
+        let tools = MetadataTools::new(manager);
+
+        let result = tools
+            .manage_tags(&path, &operation, tags.as_deref())
+            .await
+            .map_err(to_mcp_error)?;
+
+        StandardResponse::new(vault_name, "manage_tags", result)
+            .with_next_steps(&["update_frontmatter", "query_metadata"])
+            .to_json()
+    }
+
+    /// Get lightweight metadata for multiple files without reading content
+    #[tool(
+        description = "Get file metadata (size, modified time, has_frontmatter) for multiple notes without reading full content",
+        usage = "Use to quickly assess file properties before deciding which notes to read. Much faster than read_note for metadata-only queries. Supports batch queries (up to 50 paths)",
+        performance = "Very fast (<10ms typical). Only reads filesystem metadata and first 4 bytes per file",
+        related = ["read_note", "query_metadata"],
+        examples = [
+            r#"paths: ["daily/2024-01-15.md", "projects/alpha.md"]"#,
+            r#"paths: ["index.md"]"#
+        ]
+    )]
+    async fn get_notes_info(&self, paths: Vec<String>) -> McpResult<serde_json::Value> {
+        let (vault_name, manager) = self.get_vault_pair().await?;
+        let tools = FileTools::new(manager);
+        let results = tools.get_notes_info(&paths).await.map_err(to_mcp_error)?;
+
+        let count = results.len();
+        let result_data =
+            serde_json::to_value(&results).map_err(|e| McpError::internal(e.to_string()))?;
+
+        StandardResponse::new(vault_name, "get_notes_info", result_data)
+            .with_count(count)
+            .with_next_step("read_note")
+            .to_json()
+    }
+
+    /// Move any file within vault (binary-safe, confirmation-protected)
+    #[tool(
+        description = "Move or rename any file (images, PDFs, attachments) within vault with double confirmation. Binary-safe, no content processing",
+        usage = "Use for non-markdown files (images, PDFs, attachments). For markdown notes, use move_note instead (which updates link graph). Requires confirm_from and confirm_to matching from/to exactly",
+        performance = "Fast (<20ms typical). Atomic rename, falls back to copy+delete for cross-filesystem moves",
+        related = ["move_note", "delete_note"],
+        examples = [
+            "from: attachments/old.png, to: images/new.png, confirm_from: attachments/old.png, confirm_to: images/new.png"
+        ]
+    )]
+    async fn move_file(
+        &self,
+        from: String,
+        to: String,
+        confirm_from: String,
+        confirm_to: String,
+    ) -> McpResult<serde_json::Value> {
+        // Safety: confirmations must match
+        if from != confirm_from {
+            return Err(McpError::invalid_request(format!(
+                "Confirmation failed: confirm_from '{}' does not match from '{}'. Both must be identical.",
+                confirm_from, from
+            )));
+        }
+        if to != confirm_to {
+            return Err(McpError::invalid_request(format!(
+                "Confirmation failed: confirm_to '{}' does not match to '{}'. Both must be identical.",
+                confirm_to, to
+            )));
+        }
+
+        let (vault_name, manager) = self.get_vault_pair().await?;
+        let tools = FileTools::new(manager);
+        tools.move_file(&from, &to).await.map_err(to_mcp_error)?;
+
+        StandardResponse::new(
+            vault_name,
+            "move_file",
+            serde_json::json!({"from": from, "to": to, "status": "moved"}),
+        )
+        .to_json()
     }
 
     // ==================== Relationship Operations ====================

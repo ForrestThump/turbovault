@@ -12,7 +12,10 @@ use turbovault_graph::LinkGraph;
 use turbovault_parser::Parser;
 
 /// File cache entry with timestamp
+/// Used during initialization to populate link graph; read path bypasses cache
+/// to ensure raw file content (including frontmatter) is always returned.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct CacheEntry {
     file: VaultFile,
     cached_at: f64,
@@ -108,30 +111,17 @@ impl VaultManager {
     /// Cache entries are validated against the file's modification time on disk.
     /// If the file was modified externally (git sync, direct writes, other processes),
     /// the stale cache entry is bypassed and fresh content is read from disk.
+    ///
+    /// NOTE: Always reads raw file content from disk (including frontmatter).
+    /// The file cache stores parsed VaultFile with frontmatter stripped from content,
+    /// so it cannot be used here — callers expect the complete raw file.
     #[instrument(skip(self), fields(file = ?path), name = "vault_read_file")]
     pub async fn read_file(&self, path: &Path) -> Result<String> {
         let vault_path = self.resolve_path(path)?;
 
-        // Check cache — validate against file mtime to detect external modifications
-        let cache = self.file_cache.read().await;
-        if let Some(entry) = cache.get(&vault_path)
-            && !self.is_cache_expired(entry.cached_at)
-        {
-            // Verify the file hasn't been modified externally since we cached it
-            if !self
-                .is_file_modified_since(&vault_path, entry.cached_at)
-                .await
-            {
-                return Ok(entry.file.content.clone());
-            }
-            log::debug!(
-                "Cache entry stale (file modified externally): {}",
-                vault_path.display()
-            );
-        }
-        drop(cache);
-
-        // Read from disk
+        // Always read from disk to return raw content including frontmatter.
+        // The VaultFile cache stores parsed content with frontmatter stripped,
+        // which would silently lose frontmatter for callers.
         let content = tokio::fs::read_to_string(&vault_path)
             .await
             .map_err(Error::io)?;
@@ -322,7 +312,7 @@ impl VaultManager {
 
     /// Resolve a relative path to vault-root-relative path with path traversal protection
     /// Uses the battle-tested path_trav crate for security, with fallback normalization
-    fn resolve_path(&self, path: &Path) -> Result<PathBuf> {
+    pub fn resolve_path(&self, path: &Path) -> Result<PathBuf> {
         // Resolve relative paths to absolute
         let full_path = if path.is_absolute() {
             path.to_path_buf()
@@ -404,6 +394,7 @@ impl VaultManager {
     }
 
     /// Check if cache entry is expired (TTL-based)
+    #[allow(dead_code)]
     fn is_cache_expired(&self, cached_at: f64) -> bool {
         let now = self.current_timestamp();
         now - cached_at > self.config.cache_ttl as f64
@@ -412,6 +403,7 @@ impl VaultManager {
     /// Check if a file has been modified on disk since the given timestamp.
     /// Returns true if the file's mtime is newer than `since`, indicating
     /// the cache entry is stale due to external modification.
+    #[allow(dead_code)]
     async fn is_file_modified_since(&self, path: &Path, since: f64) -> bool {
         match tokio::fs::metadata(path).await {
             Ok(meta) => match meta.modified() {
