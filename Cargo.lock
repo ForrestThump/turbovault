@@ -4197,9 +4197,7 @@ dependencies = [
 
 [[package]]
 name = "turbomcp"
-version = "3.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a03c3cc2361f6c0996511475b24575a9285e3b38761d343ceeaf9669b6aac5a2"
+version = "3.0.8"
 dependencies = [
  "axum",
  "schemars",
@@ -4220,9 +4218,7 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-core"
-version = "3.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "035be0eca6f5d40a3cb66c9259f8273938157b46d4d3d29570a4326b9a507f6e"
+version = "3.0.8"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4238,9 +4234,7 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-http"
-version = "3.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7f261f4f30953d3ae15d4535ef347166780006baedfce67fe18644b7d387d0e"
+version = "3.0.8"
 dependencies = [
  "bytes",
  "futures",
@@ -4256,9 +4250,7 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-macros"
-version = "3.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3da23272b8841c31d9e2a3634b057b49fadfcea8ecf6d86d326c4b07007b276a"
+version = "3.0.8"
 dependencies = [
  "axum",
  "proc-macro-crate",
@@ -4275,9 +4267,7 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-protocol"
-version = "3.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df87a236eeadc3637fe5717f7b9bf120b8f815f8c776728ef0668c443d165c32"
+version = "3.0.8"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -4311,9 +4301,7 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-server"
-version = "3.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "256b6f2ddaab0eb30ce43bd3d0b5a33174e18555ca7ab07f66aedd293854e307"
+version = "3.0.8"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4342,9 +4330,7 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-stdio"
-version = "3.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90f66faecfe1dc034c901365103ad7e15a5942ea231453f7bec888930348a618"
+version = "3.0.8"
 dependencies = [
  "bytes",
  "futures",
@@ -4360,9 +4346,7 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-tcp"
-version = "3.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb9dca98d941c354966b2daa9e08434a51b552fab2373497614ebf12f229cd21"
+version = "3.0.8"
 dependencies = [
  "bytes",
  "futures",
@@ -4379,9 +4363,7 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-telemetry"
-version = "3.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49f54f2b81100fca3117618bd01b1a3d7451c46abf9b9cb9d6ff20129e91a7fb"
+version = "3.0.8"
 dependencies = [
  "futures-util",
  "http",
@@ -4405,9 +4387,7 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-transport"
-version = "3.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13804c7892f18c9e2db6ca5ce0d62703b1ebfe77bd803cb55071a24858f0c3db"
+version = "3.0.8"
 dependencies = [
  "ahash",
  "anyhow",
@@ -4446,9 +4426,7 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-transport-traits"
-version = "3.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dfc6f21e6bcf78b32303ff2d8686e7f9346a5f4b0e453137ad59da598c7e2bc"
+version = "3.0.8"
 dependencies = [
  "bytes",
  "futures",
@@ -4461,9 +4439,7 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-types"
-version = "3.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01b99ff2b3d05b890fc6038b2c52abbff2bc20cfb30067bc168647875b1dcc35"
+version = "3.0.8"
 dependencies = [
  "serde",
  "serde_json",
@@ -4471,9 +4447,7 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-unix"
-version = "3.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76f5add33b4ddcaf8fb5565ee6365e8a35c5d9b7b76fa140a4e98ba48ea32b90"
+version = "3.0.8"
 dependencies = [
  "bytes",
  "futures",
@@ -4490,9 +4464,7 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-websocket"
-version = "3.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "571b411b6efab703a2d56aa9c6ded6c1ad1fbf88067dbe4e8d60133306656e0a"
+version = "3.0.8"
 dependencies = [
  "bytes",
  "chrono",
@@ -4512,7 +4484,7 @@ dependencies = [
 
 [[package]]
 name = "turbovault"
-version = "1.2.9"
+version = "1.2.10"
 dependencies = [
  "anyhow",
  "clap",
@@ -4523,13 +4495,13 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "shellexpand",
  "simple_logger",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "turbomcp",
- "turbomcp-server",
  "turbovault-audit",
  "turbovault-core",
  "turbovault-tools",
@@ -4538,7 +4510,7 @@ dependencies = [
 
 [[package]]
 name = "turbovault-audit"
-version = "1.2.9"
+version = "1.2.10"
 dependencies = [
  "chrono",
  "log",
@@ -4555,7 +4527,7 @@ dependencies = [
 
 [[package]]
 name = "turbovault-batch"
-version = "1.2.9"
+version = "1.2.10"
 dependencies = [
  "chrono",
  "serde",
@@ -4569,7 +4541,7 @@ dependencies = [
 
 [[package]]
 name = "turbovault-core"
-version = "1.2.9"
+version = "1.2.10"
 dependencies = [
  "chrono",
  "log",
@@ -4578,6 +4550,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "shellexpand",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -4586,7 +4559,7 @@ dependencies = [
 
 [[package]]
 name = "turbovault-export"
-version = "1.2.9"
+version = "1.2.10"
 dependencies = [
  "chrono",
  "serde",
@@ -4598,7 +4571,7 @@ dependencies = [
 
 [[package]]
 name = "turbovault-graph"
-version = "1.2.9"
+version = "1.2.10"
 dependencies = [
  "anyhow",
  "dashmap 5.5.3",
@@ -4613,7 +4586,7 @@ dependencies = [
 
 [[package]]
 name = "turbovault-parser"
-version = "1.2.9"
+version = "1.2.10"
 dependencies = [
  "insta",
  "log",
@@ -4628,7 +4601,7 @@ dependencies = [
 
 [[package]]
 name = "turbovault-tools"
-version = "1.2.9"
+version = "1.2.10"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4656,7 +4629,7 @@ dependencies = [
 
 [[package]]
 name = "turbovault-vault"
-version = "1.2.9"
+version = "1.2.10"
 dependencies = [
  "anyhow",
  "dashmap 5.5.3",
