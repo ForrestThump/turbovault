@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # TurboVault Server
   turbovault:
@@ -14,12 +12,6 @@ services:
     environment:
       - RUST_LOG=info
       - OBSIDIAN_VAULT_PATH=/var/obsidian-vault
-    healthcheck:
-      test: [CMD, /usr/local/bin/turbovault, --help]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
     restart: unless-stopped
     stdin_open: true
     tty: true

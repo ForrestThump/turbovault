@@ -20,6 +20,8 @@ use turbovault_vault::VaultManager;
 
 /// Helper to convert internal Error to McpError
 fn to_mcp_error(e: Error) -> McpError {
+    // Log full error for server-side debugging before sanitizing for client
+    log::warn!("MCP error: {:?}", e);
     McpError::internal(e.to_string())
 }
 
@@ -161,6 +163,8 @@ pub struct ObsidianMcpServer {
     snapshot_stores: Arc<RwLock<HashMap<String, Arc<SnapshotStore>>>>,
     /// Similarity engines per vault (keyed by vault name, lazy-initialized)
     similarity_engines: Arc<RwLock<HashMap<String, Arc<SimilarityEngine>>>>,
+    /// Search engines per vault (keyed by vault name, lazy-initialized)
+    search_engines: Arc<RwLock<HashMap<String, Arc<SearchEngine>>>>,
 }
 
 impl ObsidianMcpServer {
@@ -178,6 +182,7 @@ impl ObsidianMcpServer {
             audit_logs: Arc::new(RwLock::new(HashMap::new())),
             snapshot_stores: Arc::new(RwLock::new(HashMap::new())),
             similarity_engines: Arc::new(RwLock::new(HashMap::new())),
+            search_engines: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -216,7 +221,7 @@ impl Default for ObsidianMcpServer {
     }
 }
 
-#[turbomcp::server(name = "obsidian-vault", version = "1.2.11")]
+#[turbomcp::server(name = "obsidian-vault", version = "1.3.0")]
 impl ObsidianMcpServer {
     /// Get a vault manager for the currently active vault (cached)
     async fn get_active_vault_manager(&self) -> McpResult<Arc<VaultManager>> {
@@ -277,9 +282,13 @@ impl ObsidianMcpServer {
 
         let manager = Arc::new(manager);
 
-        // Cache it
+        // Cache it — double-check to handle concurrent initialization races
         {
             let mut cache = self.vault_managers.write().await;
+            // Another task may have initialized between our read-check and here; first writer wins
+            if let Some(existing) = cache.get(&vault_name) {
+                return Ok(existing.clone());
+            }
             cache.insert(vault_name, manager.clone());
         }
 
@@ -312,6 +321,46 @@ impl ObsidianMcpServer {
             let mut cache = self.similarity_engines.write().await;
             cache.remove(&vault_name);
         }
+    }
+
+    /// Invalidate cached search engine for the active vault (call after any write operation)
+    async fn invalidate_search_cache(&self) {
+        if let Ok(vault_name) = self.get_active_vault_name().await {
+            let mut cache = self.search_engines.write().await;
+            cache.remove(&vault_name);
+        }
+    }
+
+    /// Get or build search engine for a given vault (cached, lazy-initialized)
+    async fn get_search_engine(
+        &self,
+        vault_name: &str,
+        manager: &Arc<VaultManager>,
+    ) -> McpResult<Arc<SearchEngine>> {
+        // Check cache first (read lock — fast path)
+        {
+            let cache = self.search_engines.read().await;
+            if let Some(engine) = cache.get(vault_name) {
+                return Ok(engine.clone());
+            }
+        }
+
+        // Build new engine (this indexes the entire vault via tantivy)
+        let engine = SearchEngine::new(manager.clone())
+            .await
+            .map_err(|e| McpError::internal(format!("Failed to build search engine: {}", e)))?;
+        let engine = Arc::new(engine);
+
+        // Cache it — double-check to handle concurrent callers
+        {
+            let mut cache = self.search_engines.write().await;
+            if let Some(existing) = cache.get(vault_name) {
+                return Ok(existing.clone());
+            }
+            cache.insert(vault_name.to_string(), engine.clone());
+        }
+
+        Ok(engine)
     }
 
     /// Get or build similarity engine for the active vault
@@ -519,6 +568,7 @@ impl ObsidianMcpServer {
             .map_err(to_mcp_error)?;
 
         self.invalidate_similarity_cache().await;
+        self.invalidate_search_cache().await;
         let mode_str = mode.as_deref().unwrap_or("overwrite");
         StandardResponse::new(
             vault_name,
@@ -553,6 +603,7 @@ impl ObsidianMcpServer {
             .map_err(to_mcp_error)?;
 
         self.invalidate_similarity_cache().await;
+        self.invalidate_search_cache().await;
         StandardResponse::new(
             vault_name,
             "edit_note",
@@ -592,6 +643,7 @@ impl ObsidianMcpServer {
             .map_err(to_mcp_error)?;
 
         self.invalidate_similarity_cache().await;
+        self.invalidate_search_cache().await;
         StandardResponse::new(
             vault_name,
             "delete_note",
@@ -623,6 +675,7 @@ impl ObsidianMcpServer {
             .map_err(to_mcp_error)?;
 
         self.invalidate_similarity_cache().await;
+        self.invalidate_search_cache().await;
         StandardResponse::new(
             vault_name,
             "move_note",
@@ -705,7 +758,7 @@ impl ObsidianMcpServer {
     ) -> McpResult<serde_json::Value> {
         let (vault_name, manager) = self.get_vault_pair().await?;
         let tools = SearchTools::new(manager);
-        let max_hops = max_hops.unwrap_or(2);
+        let max_hops = max_hops.unwrap_or(2).min(5); // Cap at 5 hops to prevent runaway traversal
         let related = tools
             .find_related_notes(&path, max_hops)
             .await
@@ -1045,7 +1098,7 @@ impl ObsidianMcpServer {
     )]
     async fn search(&self, query: String) -> McpResult<serde_json::Value> {
         let (vault_name, manager) = self.get_vault_pair().await?;
-        let engine = SearchEngine::new(manager).await.map_err(to_mcp_error)?;
+        let engine = self.get_search_engine(&vault_name, &manager).await?;
         let results = engine.search(&query).await.map_err(to_mcp_error)?;
 
         let result_data =
@@ -1074,7 +1127,7 @@ impl ObsidianMcpServer {
         tags: Option<Vec<String>>,
     ) -> McpResult<serde_json::Value> {
         let (vault_name, manager) = self.get_vault_pair().await?;
-        let engine = SearchEngine::new(manager).await.map_err(to_mcp_error)?;
+        let engine = self.get_search_engine(&vault_name, &manager).await?;
 
         let search_query = if let Some(tags) = tags {
             SearchQuery::new(query).with_tags(tags).limit(10)
@@ -1107,7 +1160,7 @@ impl ObsidianMcpServer {
     )]
     async fn recommend_related(&self, path: String) -> McpResult<serde_json::Value> {
         let (vault_name, manager) = self.get_vault_pair().await?;
-        let engine = SearchEngine::new(manager).await.map_err(to_mcp_error)?;
+        let engine = self.get_search_engine(&vault_name, &manager).await?;
         let results = engine
             .recommend_related(&path)
             .await
@@ -1199,6 +1252,7 @@ impl ObsidianMcpServer {
             .map_err(to_mcp_error)?;
 
         self.invalidate_similarity_cache().await;
+        self.invalidate_search_cache().await;
         let response = StandardResponse::new(
             vault_name,
             "create_from_template",
@@ -1350,6 +1404,20 @@ impl ObsidianMcpServer {
     async fn remove_vault(&self, name: String) -> McpResult<serde_json::Value> {
         let tools = VaultLifecycleTools::new(self.multi_vault_mgr.clone());
         tools.remove_vault(&name).await.map_err(to_mcp_error)?;
+
+        // Clear all per-vault caches for the removed vault
+        {
+            let mut search_cache = self.search_engines.write().await;
+            search_cache.remove(&name);
+        }
+        {
+            let mut sim_cache = self.similarity_engines.write().await;
+            sim_cache.remove(&name);
+        }
+        {
+            let mut mgr_cache = self.vault_managers.write().await;
+            mgr_cache.remove(&name);
+        }
 
         let response = StandardResponse::new(
             name.clone(),
@@ -1511,6 +1579,7 @@ impl ObsidianMcpServer {
         let result = tools.batch_execute(ops).await.map_err(to_mcp_error)?;
 
         self.invalidate_similarity_cache().await;
+        self.invalidate_search_cache().await;
         let response = StandardResponse::new(
             vault_name,
             "batch_execute",
@@ -1728,6 +1797,7 @@ impl ObsidianMcpServer {
             .map_err(to_mcp_error)?;
 
         self.invalidate_similarity_cache().await;
+        self.invalidate_search_cache().await;
         StandardResponse::new(vault_name, "update_frontmatter", result)
             .with_next_steps(&["read_note", "query_metadata"])
             .to_json()
@@ -1760,6 +1830,7 @@ impl ObsidianMcpServer {
             .map_err(to_mcp_error)?;
 
         self.invalidate_similarity_cache().await;
+        self.invalidate_search_cache().await;
         StandardResponse::new(vault_name, "manage_tags", result)
             .with_next_steps(&["update_frontmatter", "query_metadata"])
             .to_json()
@@ -1831,6 +1902,7 @@ impl ObsidianMcpServer {
             .map_err(to_mcp_error)?;
 
         self.invalidate_similarity_cache().await;
+        self.invalidate_search_cache().await;
         StandardResponse::new(
             vault_name,
             "move_file",
@@ -2471,6 +2543,7 @@ impl ObsidianMcpServer {
 
         // Invalidate similarity engine cache since vault content changed
         self.invalidate_similarity_cache().await;
+        self.invalidate_search_cache().await;
 
         // Re-parse the rolled-back file so the link graph reflects the restored content
         let restored_path = std::path::PathBuf::from(&result.path);

@@ -2,7 +2,7 @@
 # Multi-stage build for Rust TurboVault Server
 
 # Stage 1: Builder
-FROM rust:latest as builder
+FROM rust:1.90-bookworm as builder
 
 WORKDIR /build
 
@@ -11,10 +11,10 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
 # Build server in release mode
-RUN cargo build --release --package turbovault-server
+RUN cargo build --release --package turbovault
 
 # Stage 2: Runtime
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim as runtime
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
@@ -40,11 +40,9 @@ WORKDIR /var/obsidian-vault
 ENV RUST_LOG=info
 ENV OBSIDIAN_VAULT_PATH=/var/obsidian-vault
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD /usr/local/bin/turbovault --help > /dev/null 2>&1 || exit 1
+# Note: Health checks should be configured at the orchestrator level.
+# For HTTP transport mode, use: curl -sf http://localhost:${PORT}/health || exit 1
 
 # Run server with STDIO transport (MCP protocol - standard)
 # Can be mounted at runtime with: -v /path/to/vault:/var/obsidian-vault
 ENTRYPOINT ["/usr/local/bin/turbovault", "--profile", "production", "--init"]
-
