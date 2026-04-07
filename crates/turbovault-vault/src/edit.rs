@@ -206,40 +206,41 @@ impl EditEngine {
         Ok((result, warnings))
     }
 
-    /// Apply edits with full result metadata
+    /// Apply edits with full result metadata.
+    ///
+    /// Returns `(EditResult, new_content)`. The caller can use `new_content`
+    /// for writing without re-running `apply_blocks`.
     pub fn apply_edits(
         &self,
         content: &str,
         blocks: &[SearchReplaceBlock],
         dry_run: bool,
-    ) -> Result<EditResult> {
+    ) -> Result<(EditResult, String)> {
         let old_hash = compute_hash(content);
 
-        // Generate diff preview if dry run
+        // Apply blocks exactly once
+        let (new_content, warnings) = self.apply_blocks(content, blocks)?;
+
         let diff_preview = if dry_run {
-            Some(self.generate_preview(content, blocks)?)
+            Some(Self::generate_diff(content, &new_content))
         } else {
             None
         };
 
-        let (new_content, warnings) = if dry_run {
-            // For dry run, compute what would change but don't return new content
-            self.apply_blocks(content, blocks)?
-        } else {
-            self.apply_blocks(content, blocks)?
-        };
-
         let new_hash = compute_hash(&new_content);
 
-        Ok(EditResult {
-            success: true,
-            old_hash,
-            new_hash,
-            blocks_applied: blocks.len(),
-            total_blocks: blocks.len(),
-            diff_preview,
-            warnings,
-        })
+        Ok((
+            EditResult {
+                success: true,
+                old_hash,
+                new_hash,
+                blocks_applied: blocks.len(),
+                total_blocks: blocks.len(),
+                diff_preview,
+                warnings,
+            },
+            new_content,
+        ))
     }
 
     /// Find and replace using cascading fuzzy matching strategies
@@ -385,53 +386,108 @@ impl EditEngine {
         None
     }
 
-    /// Find using Levenshtein distance (with size guards to prevent DoS)
+    /// Find using semi-global alignment DP (with size guards to prevent DoS).
+    ///
+    /// Uses a two-phase approach:
+    /// 1. Forward pass: find the best end position where the search text aligns
+    /// 2. Backward pass: find the optimal start position for that alignment
+    ///
+    /// Complexity: O(n * m) vs the previous sliding window O(n * m³)
+    #[allow(clippy::needless_range_loop)] // DP loops index multiple arrays by j
     fn fuzzy_find_levenshtein(&self, content: &str, search: &str) -> Option<(usize, usize)> {
         const MAX_FUZZY_BUDGET: usize = 10_000_000;
         const MAX_SEARCH_LEN: usize = 10_000;
 
-        if search.len() > MAX_SEARCH_LEN || content.len() * search.len() > MAX_FUZZY_BUDGET {
+        let content_chars: Vec<char> = content.chars().collect();
+        let search_chars: Vec<char> = search.chars().collect();
+        let n = content_chars.len();
+        let m = search_chars.len();
+
+        if m == 0 || n == 0 || m > MAX_SEARCH_LEN || n * m > MAX_FUZZY_BUDGET {
             return None;
         }
 
-        // Sliding window approach
-        let search_len = search.len();
-        let threshold = (search_len as f32 * (1.0 - self.config.max_fuzzy_distance)) as usize;
+        let threshold = (m as f32 * (1.0 - self.config.max_fuzzy_distance)) as usize;
 
-        let mut best_match: Option<(usize, usize, usize)> = None; // (pos, len, distance)
+        // --- Phase 1: Forward semi-global DP to find best end position ---
+        // dp[j] = min edit distance to align search[0..j] ending at current content position.
+        // dp[0] = 0 for every row (free start gaps — pattern can begin anywhere in content).
+        let mut dp = vec![0usize; m + 1];
+        for j in 1..=m {
+            dp[j] = j;
+        }
 
-        // Try windows of varying sizes around search length
-        for window_size in search_len.saturating_sub(threshold)..=search_len + threshold {
-            if window_size > content.len() {
-                continue;
+        let mut best_end: Option<(usize, usize)> = None; // (end_char_idx, distance)
+
+        for i in 1..=n {
+            let mut prev_diag = 0;
+            dp[0] = 0;
+
+            for j in 1..=m {
+                let old = dp[j];
+                let cost = usize::from(content_chars[i - 1] != search_chars[j - 1]);
+                dp[j] = (prev_diag + cost)
+                    .min(dp[j] + 1) // deletion in search (skip content char)
+                    .min(dp[j - 1] + 1); // insertion in search (skip search char)
+                prev_diag = old;
             }
 
-            for start in 0..=content.len() - window_size {
-                let window = &content[start..start + window_size];
-                let distance = levenshtein_distance(search, window);
-
-                if distance <= threshold {
-                    if let Some((_, _, best_dist)) = best_match {
-                        if distance < best_dist {
-                            best_match = Some((start, window_size, distance));
-                        }
-                    } else {
-                        best_match = Some((start, window_size, distance));
-                    }
-                }
+            if dp[m] <= threshold && best_end.is_none_or(|(_, d)| dp[m] < d) {
+                best_end = Some((i, dp[m]));
             }
         }
 
-        best_match.map(|(pos, len, _)| (pos, len))
+        let (end_char_idx, _) = best_end?;
+
+        // --- Phase 2: Backward DP to find optimal start position ---
+        // Align reverse(search) against reverse(content[..end]) to find match length.
+        let max_backward = (m + threshold).min(end_char_idx);
+        let mut dp2 = vec![0usize; m + 1];
+        for j in 1..=m {
+            dp2[j] = j;
+        }
+
+        let mut best_len: Option<(usize, usize)> = None; // (match_char_len, distance)
+
+        for i in 1..=max_backward {
+            let ci = content_chars[end_char_idx - i];
+            let mut prev_diag = 0;
+            dp2[0] = 0;
+
+            for j in 1..=m {
+                let sj = search_chars[m - j];
+                let old = dp2[j];
+                let cost = usize::from(ci != sj);
+                dp2[j] = (prev_diag + cost).min(dp2[j] + 1).min(dp2[j - 1] + 1);
+                prev_diag = old;
+            }
+
+            if dp2[m] <= threshold && best_len.is_none_or(|(_, d)| dp2[m] < d) {
+                best_len = Some((i, dp2[m]));
+            }
+        }
+
+        let (match_char_len, _) = best_len?;
+        let start_char_idx = end_char_idx - match_char_len;
+
+        // Convert character indices to byte positions
+        let start_byte: usize = content_chars[..start_char_idx]
+            .iter()
+            .map(|c| c.len_utf8())
+            .sum();
+        let match_byte_len: usize = content_chars[start_char_idx..end_char_idx]
+            .iter()
+            .map(|c| c.len_utf8())
+            .sum();
+
+        Some((start_byte, match_byte_len))
     }
 
-    /// Generate preview diff for dry run
-    fn generate_preview(&self, content: &str, blocks: &[SearchReplaceBlock]) -> Result<String> {
-        let (new_content, _warnings) = self.apply_blocks(content, blocks)?;
-
+    /// Generate a unified-style diff preview from old and new content.
+    fn generate_diff(old_content: &str, new_content: &str) -> String {
         use similar::{ChangeTag, TextDiff};
 
-        let diff = TextDiff::from_lines(content, &new_content);
+        let diff = TextDiff::from_lines(old_content, new_content);
         let mut preview = String::new();
 
         for change in diff.iter_all_changes() {
@@ -443,7 +499,7 @@ impl EditEngine {
             preview.push_str(&format!("{} {}", sign, change));
         }
 
-        Ok(preview)
+        preview
     }
 }
 
@@ -491,12 +547,6 @@ pub fn compute_hash(content: &str) -> String {
 /// Normalize whitespace for comparison
 fn normalize_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Compute Levenshtein distance between two strings
-fn levenshtein_distance(a: &str, b: &str) -> usize {
-    // Use strsim crate if available, otherwise use simple implementation
-    strsim::levenshtein(a, b)
 }
 
 #[cfg(test)]
@@ -771,7 +821,7 @@ second new
         let blocks = engine.parse_blocks(input).unwrap();
 
         // apply_edits with dry_run = true
-        let edit_result = engine.apply_edits(original, &blocks, true).unwrap();
+        let (edit_result, _new_content) = engine.apply_edits(original, &blocks, true).unwrap();
 
         // dry_run should produce a diff preview but NOT change the content on disk.
         // We verify it by reading original again — it should be unchanged.
@@ -790,6 +840,53 @@ second new
         assert_ne!(
             edit_result.old_hash, edit_result.new_hash,
             "dry_run new_hash should reflect what the edit would produce"
+        );
+    }
+
+    /// Non-matching SEARCH blocks must return an error promptly, not hang.
+    /// Regression test for https://github.com/Epistates/turbovault/issues/10
+    ///
+    /// Uses a 200KB note (large vault MOC-sized) with a 500-char search block
+    /// to simulate a realistic worst case. The old O(n·m³) sliding window
+    /// would hang for minutes; the O(n·m) semi-global DP finishes in <100ms.
+    #[test]
+    fn test_no_match_returns_error_promptly() {
+        let engine = EditEngine::new();
+
+        // 200KB note — representative of a large vault's biggest files.
+        // ~4,400 lines of mixed markdown content.
+        let content = "## Section heading\n\nThe quick brown fox jumps over the lazy dog. \
+            This is a paragraph with enough variation to make fuzzy matching work hard.\n\n\
+            - bullet point with `inline code` and *emphasis*\n\
+            - another item [[with a wikilink]] and #tag\n\n"
+            .repeat(1_000);
+
+        // 500-char search block that doesn't appear anywhere — long enough
+        // to hit the Levenshtein strategy on medium files while the budget
+        // guard correctly bails on this large one.
+        let search = "fn completely_nonexistent_function() {\n    \
+            let result = some_api::call_that_never_existed(param1, param2);\n    \
+            match result {\n        \
+            Ok(value) => println!(\"success: {value}\"),\n        \
+            Err(e) => eprintln!(\"error: {e}\"),\n    \
+            }\n    \
+            // This block of code is entirely fabricated and will never match\n    \
+            // any content in the vault. It exercises all four matching strategies.\n\
+            }";
+        let replace = "replacement";
+
+        let start = std::time::Instant::now();
+        let result = engine.find_and_replace(&content, search, replace);
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "Expected an error when SEARCH text has no match"
+        );
+        assert!(
+            elapsed.as_millis() < 100,
+            "Non-matching SEARCH on 200KB content should return within 100ms, took {:?}",
+            elapsed
         );
     }
 }

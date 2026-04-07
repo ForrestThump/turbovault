@@ -4578,7 +4578,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "similar",
- "strsim",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

@@ -352,15 +352,12 @@ impl VaultManager {
         let engine = EditEngine::new();
         let blocks = engine.parse_blocks(edits)?;
 
-        let edit_result = engine.apply_edits(&current_content, &blocks, dry_run)?;
+        let (edit_result, new_content) = engine.apply_edits(&current_content, &blocks, dry_run)?;
 
         // If dry run, return preview without writing
         if dry_run {
             return Ok(edit_result);
         }
-
-        // Apply edits to get new content
-        let (new_content, _warnings) = engine.apply_blocks(&current_content, &blocks)?;
 
         // Release cache guard before write (avoid deadlock)
         drop(_cache_guard);

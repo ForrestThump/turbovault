@@ -31,7 +31,6 @@ uuid = { workspace = true }
 
 # File editing & diff
 similar = { workspace = true }
-strsim = { workspace = true }
 sha2 = { workspace = true }
 unicode-normalization = { workspace = true }
 
