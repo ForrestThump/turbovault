@@ -18,6 +18,18 @@ use turbovault_tools::{
 };
 use turbovault_vault::VaultManager;
 
+#[cfg(feature = "sql")]
+use turbovault_tools::FrontmatterSqlEngine;
+
+/// A frontmatter key-value filter for advanced search
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct FrontmatterFilter {
+    /// Frontmatter key to match (e.g. "type", "status", "project")
+    pub key: String,
+    /// Value to match against (substring match)
+    pub value: String,
+}
+
 /// Helper to convert internal Error to McpError
 fn to_mcp_error(e: Error) -> McpError {
     // Log full error for server-side debugging before sanitizing for client
@@ -221,7 +233,7 @@ impl Default for ObsidianMcpServer {
     }
 }
 
-#[turbomcp::server(name = "obsidian-vault", version = "1.3.0")]
+#[turbomcp::server(name = "obsidian-vault", version = "1.4.0")]
 impl ObsidianMcpServer {
     /// Get a vault manager for the currently active vault (cached)
     async fn get_active_vault_manager(&self) -> McpResult<Arc<VaultManager>> {
@@ -1115,25 +1127,42 @@ impl ObsidianMcpServer {
 
     /// Advanced search with filters
     #[tool(
-        description = "Enhanced search with tag filtering and metadata constraints returning ranked results with match context",
-        usage = "Use when search() returns too many results or you need tag-based filtering. Supports compound queries for precise targeting",
+        description = "Enhanced search with tag, frontmatter, and path filters returning ranked results with match context",
+        usage = "Use when search() returns too many results or you need filtered results. Supports tag filters, frontmatter key-value filters (AND logic), path exclusions, and custom result limits",
         performance = "Fast to Moderate - uses Tantivy search engine with BM25 ranking, additional filtering adds minimal overhead",
-        related = ["search", "query_metadata", "find_notes_from_template"],
-        examples = ["search 'project' tags:['work', 'active']", "find notes tagged 'important'", "query with metadata filters"]
+        related = ["search", "search_by_frontmatter", "query_metadata", "find_notes_from_template"],
+        examples = [
+            "search 'project' tags:['work', 'active']",
+            "find notes tagged 'important'",
+            "query with frontmatter_filters:[{key:'type', value:'task'}, {key:'status', value:'active'}]",
+            "search 'meeting' exclude_paths:['archive/'] limit:20"
+        ]
     )]
     async fn advanced_search(
         &self,
         query: String,
         tags: Option<Vec<String>>,
+        frontmatter_filters: Option<Vec<FrontmatterFilter>>,
+        exclude_paths: Option<Vec<String>>,
+        limit: Option<usize>,
     ) -> McpResult<serde_json::Value> {
         let (vault_name, manager) = self.get_vault_pair().await?;
         let engine = self.get_search_engine(&vault_name, &manager).await?;
 
-        let search_query = if let Some(tags) = tags {
-            SearchQuery::new(query).with_tags(tags).limit(10)
-        } else {
-            SearchQuery::new(query).limit(10)
-        };
+        let result_limit = limit.unwrap_or(10);
+        let mut search_query = SearchQuery::new(query).limit(result_limit);
+
+        if let Some(tags) = tags {
+            search_query = search_query.with_tags(tags);
+        }
+        if let Some(filters) = frontmatter_filters {
+            for f in filters {
+                search_query = search_query.with_frontmatter(f.key, f.value);
+            }
+        }
+        if let Some(excludes) = exclude_paths {
+            search_query = search_query.exclude(excludes);
+        }
 
         let results = engine
             .advanced_search(search_query)
@@ -1146,6 +1175,37 @@ impl ObsidianMcpServer {
         let response = StandardResponse::new(vault_name, "advanced_search", result_data)
             .with_count(count)
             .with_next_step("search");
+
+        response.to_json()
+    }
+
+    /// Search by frontmatter key-value pair
+    #[tool(
+        description = "Find notes where a frontmatter field matches a value. Returns up to 100 results ranked by relevance",
+        usage = "Use for structured queries like finding all notes with type:'task' or status:'active'. For multiple filters combined with AND logic, use advanced_search with frontmatter_filters instead",
+        performance = "Moderate - scans indexed content then filters by frontmatter, <200ms on 10k notes",
+        related = ["advanced_search", "query_metadata", "get_metadata_value"],
+        examples = ["key:'type' value:'task'", "key:'status' value:'active'", "key:'project' value:'alpha'"]
+    )]
+    async fn search_by_frontmatter(
+        &self,
+        key: String,
+        value: String,
+    ) -> McpResult<serde_json::Value> {
+        let (vault_name, manager) = self.get_vault_pair().await?;
+        let engine = self.get_search_engine(&vault_name, &manager).await?;
+
+        let results = engine
+            .search_by_frontmatter(&key, &value)
+            .await
+            .map_err(to_mcp_error)?;
+        let result_data =
+            serde_json::to_value(&results).map_err(|e| McpError::internal(e.to_string()))?;
+        let count = extract_count(&result_data);
+
+        let response = StandardResponse::new(vault_name, "search_by_frontmatter", result_data)
+            .with_count(count)
+            .with_next_steps(&["advanced_search", "read_note"]);
 
         response.to_json()
     }
@@ -1175,6 +1235,71 @@ impl ObsidianMcpServer {
             .with_next_step("get_related_notes");
 
         response.to_json()
+    }
+
+    // ==================== SQL Frontmatter Queries (feature = "sql") ====================
+
+    /// Inspect frontmatter schema
+    #[tool(
+        description = "Inspect the frontmatter schema across all vault notes — shows column names, types, nullability, and counts. Call this before writing SQL queries to discover available columns",
+        usage = "Always call this first before query_frontmatter_sql so you know what columns exist. Returns the full schema of the 'files' table",
+        performance = "Moderate - scans all vault files to collect schema metadata",
+        related = ["query_frontmatter_sql", "query_metadata", "advanced_search"],
+        examples = ["inspect schema to see available columns"]
+    )]
+    async fn inspect_frontmatter(&self) -> McpResult<serde_json::Value> {
+        #[cfg(feature = "sql")]
+        {
+            let (vault_name, manager) = self.get_vault_pair().await?;
+            let engine = FrontmatterSqlEngine::new(manager);
+            let result = engine.inspect().await.map_err(to_mcp_error)?;
+
+            let response = StandardResponse::new(vault_name, "inspect_frontmatter", result)
+                .with_next_step("query_frontmatter_sql");
+
+            response.to_json()
+        }
+        #[cfg(not(feature = "sql"))]
+        {
+            Err(McpError::internal(
+                "SQL feature not enabled. Rebuild TurboVault with: cargo build --features sql"
+                    .to_string(),
+            ))
+        }
+    }
+
+    /// Execute SQL query against frontmatter
+    #[tool(
+        description = "Execute arbitrary SQL against a 'files' table built from all vault note frontmatter. Each note becomes a row with 'path' + all frontmatter keys as columns. Supports WHERE, JOIN, GROUP BY, ORDER BY, LIMIT, subqueries, and aggregations",
+        usage = "Use for complex structured queries that simple tools can't express. Call inspect_frontmatter first to discover available columns. The table is named 'files' — query it directly with standard SQL",
+        performance = "Moderate to Slow - rebuilds in-memory table from vault on each call, then executes SQL. Proportional to vault size",
+        related = ["inspect_frontmatter", "query_metadata", "advanced_search"],
+        examples = [
+            "SELECT path, status, type FROM files WHERE status = 'active' AND type = 'task'",
+            "SELECT status, COUNT(*) as cnt FROM files GROUP BY status ORDER BY cnt DESC",
+            "SELECT path FROM files WHERE tags IS NOT NULL ORDER BY path LIMIT 20"
+        ]
+    )]
+    async fn query_frontmatter_sql(&self, sql: String) -> McpResult<serde_json::Value> {
+        #[cfg(feature = "sql")]
+        {
+            let (vault_name, manager) = self.get_vault_pair().await?;
+            let engine = FrontmatterSqlEngine::new(manager);
+            let result = engine.query(&sql).await.map_err(to_mcp_error)?;
+
+            let response = StandardResponse::new(vault_name, "query_frontmatter_sql", result)
+                .with_next_steps(&["inspect_frontmatter", "read_note"]);
+
+            response.to_json()
+        }
+        #[cfg(not(feature = "sql"))]
+        {
+            let _ = sql;
+            Err(McpError::internal(
+                "SQL feature not enabled. Rebuild TurboVault with: cargo build --features sql"
+                    .to_string(),
+            ))
+        }
     }
 
     // ==================== Templates (LLM Note Creation) ====================

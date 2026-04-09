@@ -5,6 +5,22 @@ All notable changes to TurboVault will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-04-08
+
+### Added
+
+- **`turbovault-sql` crate**: New dedicated crate providing a GlueSQL-powered SQL query engine for vault frontmatter. Builds three in-memory tables (`files`, `tags`, `links`) and supports arbitrary SQL including JOINs, aggregations, and subqueries. Feature-gated behind `--features sql`.
+- **`inspect_frontmatter` MCP tool**: Schema inspection for the SQL engine — shows column names, types, nullability, and counts across all vault notes. Always available; returns a helpful error when `sql` feature is not enabled.
+- **`query_frontmatter_sql` MCP tool**: Execute arbitrary SQL against vault frontmatter via GlueSQL. Supports `files` (schemaless frontmatter), `tags` (unnested tag pairs), and `links` (from vault link graph) tables.
+- **`search_by_frontmatter` MCP tool**: Dedicated tool for single frontmatter key-value queries, returning up to 100 ranked results.
+- **`advanced_search` new parameters**: `frontmatter_filters` (array of `{key, value}` pairs with AND logic), `exclude_paths` (path prefix exclusions), and `limit` (configurable result count, default 10).
+- **SQL session support**: `FrontmatterSqlEngine::session()` builds tables once for multiple queries, avoiding per-query rebuilds in multi-step LLM workflows.
+- **11 SQL engine tests**: Covering schemaless roundtrips, aggregations, JOIN across files/tags/links tables, and GlueSQL value conversion.
+
+### Fixed
+
+- **`query_metadata` returned 0 results** ([#12](https://github.com/Epistates/turbovault/issues/12)): `Path::ends_with(".md")` does Rust path-component matching (always false for `.md`). Fixed to use string suffix check.
+
 ## [1.3.2] - 2026-04-07
 
 ### Fixed

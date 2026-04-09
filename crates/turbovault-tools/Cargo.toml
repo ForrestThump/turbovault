@@ -22,7 +22,7 @@ turbovault-audit = { workspace = true }
 # MCP server framework
 # Note: No features needed here - tools crate only defines tool implementations
 # Transport features are handled by the main turbovault binary
-turbomcp = { version = "3.0.10" }
+turbomcp = { version = "3.0.11" }
 
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -42,6 +42,13 @@ similar = { workspace = true }
 
 # Tier 1d: Production-grade full-text search
 tantivy = { workspace = true }
+
+# Optional: SQL query engine for frontmatter queries
+turbovault-sql = { workspace = true, optional = true }
+
+[features]
+default = []
+sql = ["dep:turbovault-sql"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

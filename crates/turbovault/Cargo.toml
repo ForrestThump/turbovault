@@ -36,6 +36,9 @@ websocket = ["turbomcp/websocket"]           # Add WebSocket support (~200 KB)
 tcp = ["turbomcp/tcp"]                       # Add TCP server support (~100 KB)
 unix = ["turbomcp/unix"]                     # Add Unix socket support (~100 KB) [Unix-only]
 
+# SQL frontmatter queries (GlueSQL)
+sql = ["turbovault-tools/sql"]
+
 # Convenience bundles
 http-full = ["http", "websocket"]            # HTTP + WebSocket
 # Note: unix is excluded from all-transports on Windows (not supported)
@@ -54,8 +57,9 @@ turbovault-audit = { workspace = true }
 turbovault-tools = { workspace = true }
 
 # MCP server framework (features passed through from turbovault)
-turbomcp = { version = "3.0.10", features = ["stdio", "telemetry"] }
+turbomcp = { version = "3.0.11", features = ["stdio", "telemetry"] }
 
+schemars = { workspace = true }
 shellexpand = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

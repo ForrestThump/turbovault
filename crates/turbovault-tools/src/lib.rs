@@ -186,6 +186,9 @@ pub mod templates;
 pub mod validation_tools;
 pub mod vault_lifecycle;
 
+#[cfg(feature = "sql")]
+pub mod sql_engine;
+
 pub use analysis_tools::{AnalysisTools, VaultStats};
 pub use audit_tools::AuditTools;
 pub use batch_tools::BatchTools;
@@ -206,3 +209,6 @@ pub use turbovault_batch::{BatchOperation, BatchResult};
 pub use turbovault_core::prelude::*;
 pub use validation_tools::{ValidationReportInfo, ValidationTools};
 pub use vault_lifecycle::VaultLifecycleTools;
+
+#[cfg(feature = "sql")]
+pub use sql_engine::FrontmatterSqlEngine;

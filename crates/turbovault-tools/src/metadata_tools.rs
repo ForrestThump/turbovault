@@ -127,7 +127,7 @@ impl MetadataTools {
         let mut matches = Vec::new();
 
         for file_path in files {
-            if !file_path.ends_with(".md") {
+            if !file_path.to_string_lossy().to_lowercase().ends_with(".md") {
                 continue;
             }
 
