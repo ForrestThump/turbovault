@@ -287,6 +287,10 @@ impl<'a> ParseEngine<'a> {
                 }
 
                 // === Inline code ===
+                Event::Code(text) if current_heading.is_some() => {
+                    heading_text.push_str(&text);
+                    excluded.add(range.clone());
+                }
                 Event::Code(_) => {
                     excluded.add(range.clone());
                 }

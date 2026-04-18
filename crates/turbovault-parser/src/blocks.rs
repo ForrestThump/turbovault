@@ -510,9 +510,26 @@ fn process_event(event: Event, state: &mut BlockParserState, blocks: &mut Vec<Co
             state.in_strikethrough = false;
         }
         Event::Code(text) => {
-            state.in_code_inline = true;
-            state.add_inline_text(&text);
-            state.in_code_inline = false;
+            if state.in_heading {
+                state.heading_buffer.push_str(&text);
+                state.heading_inline.push(InlineElement::Code {
+                    value: text.to_string(),
+                });
+            } else if state.in_blockquote {
+                // Re-emit with delimiters so the buffer is re-parseable as inline code
+                state.blockquote_buffer.push('`');
+                state.blockquote_buffer.push_str(&text);
+                state.blockquote_buffer.push('`');
+            } else if state.in_table {
+                // Re-emit with delimiters so table cell strings carry inline code markers
+                state.paragraph_buffer.push('`');
+                state.paragraph_buffer.push_str(&text);
+                state.paragraph_buffer.push('`');
+            } else {
+                state.in_code_inline = true;
+                state.add_inline_text(&text);
+                state.in_code_inline = false;
+            }
         }
         Event::Start(Tag::Link { dest_url, .. }) => {
             // For nested list items, add newline and indent before the link
