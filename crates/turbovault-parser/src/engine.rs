@@ -326,12 +326,10 @@ impl<'a> ParseEngine<'a> {
                 }
 
                 // === Headings ===
-                Event::Start(Tag::Heading { level, id, .. }) => {
-                    if options.parse_headings {
-                        current_heading = Some((level, id.map(|s| s.to_string())));
-                        heading_text.clear();
-                        heading_start = range.start;
-                    }
+                Event::Start(Tag::Heading { level, id, .. }) if options.parse_headings => {
+                    current_heading = Some((level, id.map(|s| s.to_string())));
+                    heading_text.clear();
+                    heading_start = range.start;
                 }
                 Event::End(TagEnd::Heading(_)) => {
                     if let Some((level, id)) = current_heading.take() {
@@ -364,22 +362,20 @@ impl<'a> ParseEngine<'a> {
                 }
 
                 // === Tasks ===
-                Event::TaskListMarker(_checked) => {
-                    if options.parse_tasks {
-                        in_task_item = true;
-                        // Read raw marker byte to detect extended states [/] [-]
-                        task_checked = {
-                            let raw_marker =
-                                self.content
-                                    .as_bytes()
-                                    .get(range.start + 1)
-                                    .copied()
-                                    .unwrap_or(b' ') as char;
-                            crate::models::TaskStatus::from_marker(raw_marker).is_completed()
-                        };
-                        task_content.clear();
-                        task_start = range.start;
-                    }
+                Event::TaskListMarker(_checked) if options.parse_tasks => {
+                    in_task_item = true;
+                    // Read raw marker byte to detect extended states [/] [-]
+                    task_checked = {
+                        let raw_marker = self
+                            .content
+                            .as_bytes()
+                            .get(range.start + 1)
+                            .copied()
+                            .unwrap_or(b' ') as char;
+                        crate::models::TaskStatus::from_marker(raw_marker).is_completed()
+                    };
+                    task_content.clear();
+                    task_start = range.start;
                 }
                 Event::End(TagEnd::Item) if in_task_item => {
                     in_task_item = false;
@@ -404,12 +400,10 @@ impl<'a> ParseEngine<'a> {
                 // === Markdown Links ===
                 Event::Start(Tag::Link {
                     dest_url, title, ..
-                }) => {
-                    if options.parse_markdown_links && !in_code_block {
-                        current_link = Some((dest_url.to_string(), title.to_string()));
-                        link_text.clear();
-                        link_start = range.start;
-                    }
+                }) if options.parse_markdown_links && !in_code_block => {
+                    current_link = Some((dest_url.to_string(), title.to_string()));
+                    link_text.clear();
+                    link_start = range.start;
                 }
                 Event::End(TagEnd::Link) => {
                     if let Some((url, _title)) = current_link.take() {
@@ -914,6 +908,18 @@ mod tests {
         assert_eq!(result.headings[0].text, "Heading 1");
         assert_eq!(result.headings[1].level, 2);
         assert_eq!(result.headings[2].level, 3);
+    }
+
+    // Regression test for PR #15: inline code inside a heading must appear in
+    // the extracted heading text rather than being dropped.
+    #[test]
+    fn test_engine_heading_with_inline_code() {
+        let content = "# Use `foo()` carefully\n\nBody.";
+        let engine = ParseEngine::new(content);
+        let result = engine.parse(&ParseOptions::all());
+
+        assert_eq!(result.headings.len(), 1);
+        assert_eq!(result.headings[0].text, "Use foo() carefully");
     }
 
     #[test]

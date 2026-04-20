@@ -691,21 +691,17 @@ fn process_event(event: Event, state: &mut BlockParserState, blocks: &mut Vec<Co
                 state.add_inline_text(&text);
             }
         }
-        Event::SoftBreak => {
-            if state.in_paragraph {
-                state.paragraph_buffer.push(' ');
-                state.inline_buffer.push(InlineElement::Text {
-                    value: " ".to_string(),
-                });
-            }
+        Event::SoftBreak if state.in_paragraph => {
+            state.paragraph_buffer.push(' ');
+            state.inline_buffer.push(InlineElement::Text {
+                value: " ".to_string(),
+            });
         }
-        Event::HardBreak => {
-            if state.in_paragraph {
-                state.paragraph_buffer.push('\n');
-                state.inline_buffer.push(InlineElement::Text {
-                    value: "\n".to_string(),
-                });
-            }
+        Event::HardBreak if state.in_paragraph => {
+            state.paragraph_buffer.push('\n');
+            state.inline_buffer.push(InlineElement::Text {
+                value: "\n".to_string(),
+            });
         }
         Event::Rule => {
             state.flush_paragraph(blocks);
@@ -1600,5 +1596,71 @@ See [[WikiNote]] for more info."#;
         } else {
             panic!("Expected Paragraph block");
         }
+    }
+
+    // Regression tests for PR #15: inline code in headings/blockquotes/tables
+    // previously leaked into the following paragraph's buffers.
+
+    #[test]
+    fn test_inline_code_in_heading_does_not_leak() {
+        let markdown = "# Use `foo()` carefully\n\nThis is the body.";
+        let blocks = parse_blocks(markdown);
+
+        assert_eq!(blocks.len(), 2);
+
+        let ContentBlock::Heading {
+            content, inline, ..
+        } = &blocks[0]
+        else {
+            panic!("Expected Heading block, got {:?}", blocks[0]);
+        };
+        assert_eq!(content, "Use foo() carefully");
+        assert!(
+            inline
+                .iter()
+                .any(|e| matches!(e, InlineElement::Code { value } if value == "foo()")),
+            "heading inline elements should include the Code element"
+        );
+
+        let ContentBlock::Paragraph { content, .. } = &blocks[1] else {
+            panic!("Expected Paragraph block, got {:?}", blocks[1]);
+        };
+        assert_eq!(
+            content, "This is the body.",
+            "inline code from heading must not leak into the following paragraph"
+        );
+    }
+
+    #[test]
+    fn test_inline_code_in_blockquote_preserved() {
+        let markdown = "> Run `cargo test` before committing";
+        let blocks = parse_blocks(markdown);
+
+        assert_eq!(blocks.len(), 1);
+        let ContentBlock::Blockquote { content, .. } = &blocks[0] else {
+            panic!("Expected Blockquote block, got {:?}", blocks[0]);
+        };
+        assert!(
+            content.contains("`cargo test`"),
+            "blockquote content should preserve inline code with backticks, got: {content:?}"
+        );
+    }
+
+    #[test]
+    fn test_inline_code_in_table_cell_preserved() {
+        let markdown = "| Command | Effect |\n|---|---|\n| `ls` | list files |";
+        let blocks = parse_blocks(markdown);
+
+        assert_eq!(blocks.len(), 1);
+        let ContentBlock::Table { rows, .. } = &blocks[0] else {
+            panic!("Expected Table block, got {:?}", blocks[0]);
+        };
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0][0].contains("`ls`"),
+            "table cell should preserve inline code with backticks, got: {:?}",
+            rows[0][0]
+        );
+        assert_eq!(rows[0][1], "list files");
     }
 }

@@ -1442,7 +1442,7 @@ dependencies = [
  "itertools 0.12.1",
  "md-5",
  "ordered-float 4.6.0",
- "rand 0.8.5",
+ "rand 0.8.6",
  "regex",
  "rust_decimal",
  "serde",
@@ -2521,7 +2521,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7bb71e1b3fa6ca1c61f383464aaf2bb0e2f8e772a1f01d486832464de363b951"
 dependencies = [
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.6",
  "serde",
 ]
 
@@ -2971,9 +2971,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.8.5"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34af8d1a0e25924bc5b7c43c079c942339d8f0a8b57c39049bef581b46327404"
+checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -3359,7 +3359,7 @@ dependencies = [
  "borsh",
  "bytes",
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.6",
  "rkyv 0.7.46",
  "serde",
  "serde_json",
@@ -4256,9 +4256,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.52.0"
+version = "1.52.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a91135f59b1cbf38c91e73cf3386fca9bb77915c45ce2771460c9d92f0f3d776"
+checksum = "b67dee974fe86fd92cc45b7a95fdd2f99a36a6d7b0d431a231178d3d670bbcc6"
 dependencies = [
  "bytes",
  "libc",
@@ -4613,9 +4613,9 @@ dependencies = [
 
 [[package]]
 name = "turbomcp"
-version = "3.0.14"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53818b5c53f7088aaf2ce7612f707cdd5804902dc10aed92ebfa578bc2b833cd"
+checksum = "d45f11e6a697059bc5ba8259646502098dcd66a810ba48f888a2610ea9215639"
 dependencies = [
  "axum",
  "schemars",
@@ -4636,9 +4636,9 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-core"
-version = "3.0.14"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91011a9b07a9d399887df2dae305aba4410844228950c1fccb1a9619892e6925"
+checksum = "b737263fc01892e426760fdb08f80fbdc8a8a2df81d0671d208372fdefd10530"
 dependencies = [
  "base64",
  "chrono",
@@ -4654,9 +4654,9 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-http"
-version = "3.0.14"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7489b2e45fb44ab35224a72249ebcecf4c860f70ab142d71b44769993e135936"
+checksum = "e68a577f374e4032f7310a7cb867edc3726f290a0720d5ccb7280d04e2466b36"
 dependencies = [
  "bytes",
  "futures",
@@ -4672,9 +4672,9 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-macros"
-version = "3.0.14"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c5d04ec51c48a23f08d5985e33624b5c1d2340d4e72f7888a2c32eb6b7dc66"
+checksum = "bdc934527924d3d8a6565f0798416bf405d076ee17922348f345827535f3c8cf"
 dependencies = [
  "axum",
  "proc-macro-crate",
@@ -4691,9 +4691,9 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-protocol"
-version = "3.0.14"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12b95904acdabef794743d9a444883b8dafe1b4d77b296b6e214c2648b8b28e3"
+checksum = "0c42fbd44fc50bfa1a7e9aa028d1eeb66fd37853e19fc3ae7d5e31e9a31d1de6"
 dependencies = [
  "ahash 0.8.12",
  "arc-swap",
@@ -4727,9 +4727,9 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-server"
-version = "3.0.14"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75a45dcdc2c7d353db175b1cd004f063dc6f68832345c5456aae2e98d0b71b84"
+checksum = "4a0368d702dec617713a82a1aca14b1b049e11b9ea93d7f63aa1094a1d746ab4"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4758,9 +4758,9 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-stdio"
-version = "3.0.14"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d98594f9db3a9ff33040b2bd464dcb59fd874ab86200f9c716747af26dabbd6"
+checksum = "ee5832ec4bf537befbb57627a95e9b8d191eaa7834a121712038dc2b851e85e6"
 dependencies = [
  "bytes",
  "futures",
@@ -4776,9 +4776,9 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-tcp"
-version = "3.0.14"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62fa570378f8ea70b0da77c46baee03b3a9fea6884c0dc6c5f2bea363bbb1d31"
+checksum = "d2662b7c2986b998646054213756823ae17f265b4e6e6b16c345686e7484dada"
 dependencies = [
  "bytes",
  "futures",
@@ -4795,9 +4795,9 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-telemetry"
-version = "3.0.14"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0435ea0619858dd5cf546ac36eae7b5cc64f1a60aa4c082af748974da40a253e"
+checksum = "291604b7126cbac4104ddfa9c39e2c5ff438be22a7890268e6aeb485a80e5bc0"
 dependencies = [
  "futures-util",
  "http",
@@ -4821,9 +4821,9 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-transport"
-version = "3.0.14"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b2aae62f02d31008965bd4daffaf019ef7181a1551b1650ca13a8620851d0f7"
+checksum = "c9f896a7cef0c6530fa95a3bbf9da57f5c66d48110e4258dfe0c57d636a9fda1"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -4862,9 +4862,9 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-transport-traits"
-version = "3.0.14"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71c6af6c1a621f80174d60a025c2eccfab7d435c3ba746e9904efe029297d051"
+checksum = "d5e1abf0c74d763f08e143cd381e7d3d610a2bfa78da905398092f91871e12a0"
 dependencies = [
  "bytes",
  "futures",
@@ -4877,9 +4877,9 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-types"
-version = "3.0.14"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1814cd60f10be9252e28fc3635ddf9bf8b3935d8201e7de69045e5c26d4e940"
+checksum = "0f455acd4d13b15d7276d68bf76218e31e81847eac16ae0081da6d8552b20df4"
 dependencies = [
  "serde",
  "serde_json",
@@ -4887,9 +4887,9 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-unix"
-version = "3.0.14"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "969d0754aeeb1e631afa972ab81919ed1f26649801c10a8a92281165e870912f"
+checksum = "d9c8514c39d35543eac89fbfeba227c921ce4baf559faac331f9530fdf801069"
 dependencies = [
  "bytes",
  "futures",
@@ -4906,9 +4906,9 @@ dependencies = [
 
 [[package]]
 name = "turbomcp-websocket"
-version = "3.0.14"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25acc3b86707fb41343c060b775f8c8462389d5db10e719bb6ecd6ba7f0969b9"
+checksum = "e7a2c94ba00cebc97d41ad9c2d21a163b738b4d790bbbe3a5950ff8ff25d3a96"
 dependencies = [
  "bytes",
  "chrono",
@@ -5120,9 +5120,9 @@ checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
 
 [[package]]
 name = "typenum"
-version = "1.19.0"
+version = "1.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
+checksum = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
 
 [[package]]
 name = "typetag"
@@ -5310,11 +5310,11 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "wasip2"
-version = "1.0.2+wasi-0.2.9"
+version = "1.0.3+wasi-0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9517f9239f02c069db75e65f174b3da828fe5f5b945c4dd26bd25d89c03ebcf5"
+checksum = "20064672db26d7cdc89c7798c48a0fdfac8213434a1186e5ef29fd560ae223d6"
 dependencies = [
- "wit-bindgen",
+ "wit-bindgen 0.57.1",
 ]
 
 [[package]]
@@ -5323,7 +5323,7 @@ version = "0.4.0+wasi-0.3.0-rc-2026-01-06"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5428f8bf88ea5ddc08faddef2ac4a67e390b88186c703ce6dbd955e1c145aca5"
 dependencies = [
- "wit-bindgen",
+ "wit-bindgen 0.51.0",
 ]
 
 [[package]]
@@ -5796,6 +5796,12 @@ checksum = "d7249219f66ced02969388cf2bb044a09756a083d0fab1e566056b04d9fbcaa5"
 dependencies = [
  "wit-bindgen-rust-macro",
 ]
+
+[[package]]
+name = "wit-bindgen"
+version = "0.57.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wit-bindgen-core"

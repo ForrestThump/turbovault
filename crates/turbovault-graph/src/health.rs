@@ -242,7 +242,7 @@ impl<'a> HealthAnalyzer<'a> {
         }
 
         // Sort by connection count (descending)
-        hubs.sort_by(|a, b| b.1.cmp(&a.1));
+        hubs.sort_by_key(|b| std::cmp::Reverse(b.1));
         hubs.truncate(limit);
 
         Ok(hubs)
