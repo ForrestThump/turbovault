@@ -220,6 +220,28 @@ pub struct TaskItem {
     pub due_date: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct TaskBuilder{
+    pub content: String,
+    pub is_completed: bool,
+    pub position: Option<SourcePosition>,
+    pub due_date: Option<String>,
+}
+
+impl TaskBuilder {
+    pub fn build(&mut self) -> TaskItem {
+        let task_item = TaskItem {
+            content: self.content.trim().to_string(),
+            is_completed: std::mem::take(&mut self.is_completed), 
+            position: self.position.expect("Must have posiiton."),
+            due_date: std::mem::take(&mut self.due_date),
+        };
+        self.content.clear(); // = String::new();
+        self.position = None;
+        task_item
+    }
+}
+
 /// Type of callout block
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CalloutType {

@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 use turbovault_core::{
     Callout, CalloutType, Frontmatter, Heading, LineIndex, Link, LinkType, SourcePosition,
-    Tag as OFMTag, TaskItem,
+    Tag as OFMTag, TaskItem, TaskBuilder,
 };
 
 use crate::ParseOptions;
@@ -266,10 +266,14 @@ impl<'a> ParseEngine<'a> {
         let mut current_heading: Option<(HeadingLevel, Option<String>)> = None;
         let mut heading_text = String::new();
         let mut heading_start: usize = 0;
+
         let mut in_task_item = false;
         let mut task_checked = false;
         let mut task_content = String::new();
         let mut task_start: usize = 0;
+
+        let mut task_builder: TaskBuilder = TaskBuilder::default();
+
         let mut current_link: Option<(String, String)> = None; // (url, title)
         let mut link_text = String::new();
         let mut link_start: usize = 0;
@@ -365,7 +369,7 @@ impl<'a> ParseEngine<'a> {
                 Event::TaskListMarker(_checked) if options.parse_tasks => {
                     in_task_item = true;
                     // Read raw marker byte to detect extended states [/] [-]
-                    task_checked = {
+                    task_builder.is_completed = {
                         let raw_marker = self
                             .content
                             .as_bytes()
@@ -374,27 +378,20 @@ impl<'a> ParseEngine<'a> {
                             .unwrap_or(b' ') as char;
                         crate::models::TaskStatus::from_marker(raw_marker).is_completed()
                     };
-                    task_content.clear();
-                    task_start = range.start;
+                    // task_content.clear();
+                    task_builder.position = Some(SourcePosition::from_offset_indexed(&self.index, range.start, range.end - range.start));
+                    // task_start = range.start;
                 }
                 Event::End(TagEnd::Item) if in_task_item => {
                     in_task_item = false;
                     if !task_content.is_empty() {
-                        result.tasks.push(TaskItem {
-                            content: task_content.trim().to_string(),
-                            is_completed: task_checked,
-                            position: SourcePosition::from_offset_indexed(
-                                &self.index,
-                                task_start,
-                                range.end - task_start,
-                            ),
-                            due_date: None,
-                        });
+                        result.tasks.push(task_builder.build());
                     }
-                    task_content.clear();
+                    // task_content.clear();
                 }
                 Event::Text(text) if in_task_item => {
-                    task_content.push_str(&text);
+                    task_builder.content.push_str(&text);
+                    // task_content.push_str(&text);
                 }
 
                 // === Markdown Links ===
@@ -439,6 +436,8 @@ impl<'a> ParseEngine<'a> {
         excluded.optimize();
         (excluded, body_start)
     }
+
+    fn parse_task_content(&self, )
 
     /// Parse wikilinks, respecting excluded ranges.
     fn parse_wikilinks(
