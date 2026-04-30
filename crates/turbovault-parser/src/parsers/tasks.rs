@@ -5,7 +5,7 @@
 
 use regex::Regex;
 use std::sync::LazyLock;
-use turbovault_core::{LineIndex, SourcePosition, TaskItem};
+use turbovault_core::{LineIndex, SourcePosition, TaskItem, task_parser};
 
 /// Matches - [ ] or - [x] followed by task text
 static TASK_PATTERN: LazyLock<Regex> =
@@ -40,17 +40,18 @@ pub fn parse_tasks(content: &str) -> Vec<TaskItem> {
                 let task_content = caps.get(3).unwrap().as_str();
                 let full_match = caps.get(0).unwrap();
 
-                TaskItem {
-                    content: task_content.to_string(),
+                let parsed = task_parser::parse_task_content(task_content);
+
+                TaskItem::from_parsed_metadata(
+                    parsed,
                     is_completed,
-                    position: SourcePosition::new(
+                    SourcePosition::new(
                         idx + 1,
                         indent.len() + 1, // column accounts for indentation
                         line_start + indent.len(),
                         full_match.len() - indent.len(),
                     ),
-                    due_date: None,
-                }
+                )
             })
         })
         .collect()
@@ -155,5 +156,25 @@ mod tests {
             assert_eq!(r.position.line, i.position.line);
             assert_eq!(r.position.offset, i.position.offset);
         }
+    }
+
+    #[test]
+    fn test_task_metadata() {
+        let content = "- [ ] Review PR [due:: 2026-05-01], [project:: [[Team Work]]], [onCompletion:: delete] 🔁 every weekday #review";
+        let tasks = parse_tasks(content);
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].content, "Review PR");
+        assert_eq!(
+            tasks[0].due_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-05-01")
+        );
+        assert_eq!(tasks[0].recurrence.as_deref(), Some("every weekday"));
+        assert_eq!(tasks[0].on_completion.as_deref(), Some("delete"));
+        assert_eq!(tasks[0].tags, vec!["review".to_string()]);
+        assert_eq!(
+            tasks[0].metadata.get("project").map(String::as_str),
+            Some("[[Team Work]]")
+        );
     }
 }

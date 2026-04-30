@@ -8,9 +8,13 @@
 //!
 //! The types roughly correspond to Python dataclasses in the reference implementation.
 
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::path::PathBuf;
+
+use crate::task_parser::ParsedTaskMetadata;
 
 /// Position in source text (line, column, byte offset)
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -214,32 +218,164 @@ pub struct Tag {
 /// A task item in vault content
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskItem {
+    /// Task description with trailing Obsidian Tasks metadata removed.
     pub content: String,
     pub is_completed: bool,
     pub position: SourcePosition,
-    pub due_date: Option<String>,
+    pub created_date: Option<NaiveDate>,
+    pub scheduled_date: Option<NaiveDate>,
+    pub start_date: Option<NaiveDate>,
+    pub due_date: Option<NaiveDate>,
+    pub done_date: Option<NaiveDate>,
+    pub cancelled_date: Option<NaiveDate>,
+    #[serde(default)]
+    pub priority: TaskPriority,
+    /// Recurrence rule text, for example `every weekday`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recurrence: Option<String>,
+    /// On-completion action, for example `keep` or `delete`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_completion: Option<String>,
+    /// Tasks plugin dependency ID without the leading `🆔` marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Tasks plugin dependency IDs from `⛔` or `[dependsOn:: ...]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    /// Inline task tags without the leading `#`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Obsidian block reference without the leading `^`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_ref: Option<String>,
+    /// Dataview inline fields parsed from trailing task metadata.
+    ///
+    /// Standard fields are also projected into the typed fields above; custom
+    /// fields remain available here.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, String>,
+}
+
+impl TaskItem {
+    /// Build a [`TaskItem`] from parsed Obsidian Tasks metadata.
+    #[must_use]
+    pub fn from_parsed_metadata(
+        parsed: crate::task_parser::ParsedTaskMetadata,
+        is_completed: bool,
+        position: SourcePosition,
+    ) -> Self {
+        Self {
+            content: parsed.description,
+            is_completed,
+            position,
+            created_date: parse_date_opt(parsed.created.as_deref()),
+            scheduled_date: parse_date_opt(parsed.scheduled.as_deref()),
+            start_date: parse_date_opt(parsed.start.as_deref()),
+            due_date: parse_date_opt(parsed.due.as_deref()),
+            done_date: parse_date_opt(parsed.done.as_deref()),
+            cancelled_date: parse_date_opt(parsed.cancelled.as_deref()),
+            priority: parsed
+                .priority
+                .and_then(TaskPriority::from_char)
+                .unwrap_or_default(),
+            recurrence: parsed.recurrence,
+            on_completion: parsed.on_completion,
+            id: parsed.id,
+            depends_on: parsed.depends_on,
+            tags: parsed.tags,
+            block_ref: parsed.block_ref,
+            metadata: parsed.metadata,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TaskPriority {
+    Lowest,
+    Low,
+    Normal,
+    Medium,
+    High,
+    Highest,
+}
+
+impl TaskPriority {
+    pub fn emoji(&self) -> &'static str {
+        match self {
+            TaskPriority::Lowest => "⏬",
+            TaskPriority::Low => "🔽",
+            TaskPriority::Normal => "",
+            TaskPriority::Medium => "🔼",
+            TaskPriority::High => "⏫",
+            TaskPriority::Highest => "🔺",
+        }
+    }
+
+    pub fn from_emoji(s: &str) -> Option<Self> {
+        Some(match s {
+            "⏬" => TaskPriority::Lowest,
+            "🔽" => TaskPriority::Low,
+            "" => TaskPriority::Normal,
+            "🔼" => TaskPriority::Medium,
+            "⏫" => TaskPriority::High,
+            "🔺" => TaskPriority::Highest,
+            _ => return None,
+        })
+    }
+
+    pub fn from_char(c: char) -> Option<Self> {
+        Self::from_emoji(c.encode_utf8(&mut [0; 4]))
+    }
+
+    pub fn is_valid_emoji(s: &str) -> bool {
+        Self::from_emoji(s).is_some()
+    }
+}
+
+impl Default for TaskPriority {
+    fn default() -> Self {
+        TaskPriority::Normal
+    }
+}
+
+impl fmt::Display for TaskPriority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            TaskPriority::Lowest => "⏬",
+            TaskPriority::Low => "🔽",
+            TaskPriority::Normal => "",
+            TaskPriority::Medium => "🔼",
+            TaskPriority::High => "⏫",
+            TaskPriority::Highest => "🔺",
+        };
+        write!(f, "{}", s)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct TaskBuilder{
+pub struct TaskBuilder {
     pub content: String,
     pub is_completed: bool,
     pub position: Option<SourcePosition>,
-    pub due_date: Option<String>,
 }
 
 impl TaskBuilder {
     pub fn build(&mut self) -> TaskItem {
-        let task_item = TaskItem {
-            content: self.content.trim().to_string(),
-            is_completed: std::mem::take(&mut self.is_completed), 
-            position: self.position.expect("Must have posiiton."),
-            due_date: std::mem::take(&mut self.due_date),
-        };
-        self.content.clear(); // = String::new();
+        let parsed: ParsedTaskMetadata = crate::task_parser::parse_task_content(&self.content);
+        let task_item = TaskItem::from_parsed_metadata(
+            parsed,
+            std::mem::take(&mut self.is_completed),
+            self.position.expect("Must have position."),
+        );
+        self.content.clear();
         self.position = None;
         task_item
     }
+}
+
+fn parse_date_opt(value: Option<&str>) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(value?, "%Y-%m-%d").ok()
 }
 
 /// Type of callout block
@@ -789,5 +925,167 @@ mod tests {
         assert_eq!(index.line_count(), 2); // Line 1 + empty line 2
         assert_eq!(index.line_col(6), (1, 7)); // The newline itself
         assert_eq!(index.line_col(7), (2, 1)); // After newline
+    }
+
+    #[test]
+    fn test_task_item_from_parsed_metadata() {
+        let mut metadata = HashMap::new();
+        metadata.insert("project".to_string(), "[[Team Work]]".to_string());
+
+        let task = TaskItem::from_parsed_metadata(
+            crate::task_parser::ParsedTaskMetadata {
+                description: "Review PR".to_string(),
+                due: Some("2026-05-01".to_string()),
+                scheduled: Some("2026-04-30".to_string()),
+                start: Some("2026-04-29".to_string()),
+                done: None,
+                cancelled: None,
+                created: Some("2026-04-28".to_string()),
+                priority: Some('⏫'),
+                recurrence: Some("every weekday".to_string()),
+                on_completion: Some("delete".to_string()),
+                id: Some("pr-123".to_string()),
+                depends_on: vec!["abc123".to_string(), "def456".to_string()],
+                tags: vec!["review".to_string()],
+                block_ref: Some("pr-123".to_string()),
+                metadata,
+            },
+            false,
+            SourcePosition::start(),
+        );
+
+        assert_eq!(task.content, "Review PR");
+        assert_eq!(
+            task.due_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-05-01")
+        );
+        assert_eq!(
+            task.scheduled_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-04-30")
+        );
+        assert_eq!(
+            task.start_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-04-29")
+        );
+        assert_eq!(
+            task.created_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-04-28")
+        );
+        assert_eq!(task.priority, TaskPriority::High);
+        assert_eq!(task.recurrence.as_deref(), Some("every weekday"));
+        assert_eq!(task.on_completion.as_deref(), Some("delete"));
+        assert_eq!(task.id.as_deref(), Some("pr-123"));
+        assert_eq!(
+            task.depends_on,
+            vec!["abc123".to_string(), "def456".to_string()]
+        );
+        assert_eq!(task.tags, vec!["review".to_string()]);
+        assert_eq!(task.block_ref.as_deref(), Some("pr-123"));
+        assert_eq!(
+            task.metadata.get("project").map(String::as_str),
+            Some("[[Team Work]]")
+        );
+    }
+
+    #[test]
+    fn test_task_item_deserializes_without_metadata_fields() {
+        let task: TaskItem = serde_json::from_str(
+            r#"{
+                "content": "Legacy task",
+                "is_completed": false,
+                "position": {
+                    "line": 1,
+                    "column": 1,
+                    "offset": 0,
+                    "length": 13
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(task.content, "Legacy task");
+        assert!(!task.is_completed);
+        assert_eq!(task.priority, TaskPriority::Normal);
+        assert!(task.due_date.is_none());
+        assert!(task.metadata.is_empty());
+    }
+
+    #[test]
+    fn test_task_item_deserializes_with_metadata_fields() {
+        let task: TaskItem = serde_json::from_str(
+            r#"{
+                "content": "Modern task",
+                "is_completed": true,
+                "position": {
+                    "line": 2,
+                    "column": 1,
+                    "offset": 14,
+                    "length": 42
+                },
+                "created_date": "2026-04-28",
+                "scheduled_date": "2026-04-29",
+                "start_date": "2026-04-30",
+                "due_date": "2026-05-01",
+                "done_date": "2026-05-02",
+                "cancelled_date": null,
+                "priority": "HIGH",
+                "recurrence": "every weekday",
+                "on_completion": "delete",
+                "id": "task-123",
+                "depends_on": ["abc123", "def456"],
+                "tags": ["review", "work"],
+                "block_ref": "block-123",
+                "metadata": {
+                    "project": "[[Team Work]]"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(task.content, "Modern task");
+        assert!(task.is_completed);
+        assert_eq!(
+            task.created_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-04-28")
+        );
+        assert_eq!(
+            task.scheduled_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-04-29")
+        );
+        assert_eq!(
+            task.start_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-04-30")
+        );
+        assert_eq!(
+            task.due_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-05-01")
+        );
+        assert_eq!(
+            task.done_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-05-02")
+        );
+        assert!(task.cancelled_date.is_none());
+        assert_eq!(task.priority, TaskPriority::High);
+        assert_eq!(task.recurrence.as_deref(), Some("every weekday"));
+        assert_eq!(task.on_completion.as_deref(), Some("delete"));
+        assert_eq!(task.id.as_deref(), Some("task-123"));
+        assert_eq!(
+            task.depends_on,
+            vec!["abc123".to_string(), "def456".to_string()]
+        );
+        assert_eq!(task.tags, vec!["review".to_string(), "work".to_string()]);
+        assert_eq!(task.block_ref.as_deref(), Some("block-123"));
+        assert_eq!(
+            task.metadata.get("project").map(String::as_str),
+            Some("[[Team Work]]")
+        );
+    }
+
+    #[test]
+    fn test_task_priority_serializes_as_stable_api_value() {
+        assert_eq!(
+            serde_json::to_value(TaskPriority::High).unwrap(),
+            serde_json::Value::String("HIGH".to_string())
+        );
     }
 }
