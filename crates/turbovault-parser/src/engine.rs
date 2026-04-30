@@ -374,11 +374,11 @@ impl<'a> ParseEngine<'a> {
                             .unwrap_or(b' ') as char;
                         crate::models::TaskStatus::from_marker(raw_marker).is_completed()
                     };
-                    task_builder.position = Some(SourcePosition::from_offset_indexed(
+                    task_builder.position = SourcePosition::from_offset_indexed(
                         &self.index,
                         range.start,
                         range.end - range.start,
-                    ));
+                    );
                 }
 
                 Event::End(TagEnd::Item) if in_task_item => {

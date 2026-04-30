@@ -152,7 +152,11 @@ fn find_metadata_start(content: &str) -> usize {
             in_word = false;
         } else if !in_word {
             in_word = true;
-            if is_pure_metadata(&content[i..]) && !previous_token_is_priority(&content[..i]) {
+            let rest = &content[i..];
+            if starts_metadata_token(rest)
+                && !previous_token_is_priority(&content[..i])
+                && is_pure_metadata(rest)
+            {
                 return i;
             }
         }
@@ -280,9 +284,10 @@ fn parse_recurrence_field(input: &mut &str) -> ModalResult<ParsedTaskMetadata> {
         return Err(ErrMode::Backtrack(ContextError::new()));
     }
 
-    let mut meta = ParsedTaskMetadata::default();
-    meta.recurrence = Some(words.join(" "));
-    Ok(meta)
+    Ok(ParsedTaskMetadata {
+        recurrence: Some(words.join(" ")),
+        ..Default::default()
+    })
 }
 
 fn parse_on_completion_field(input: &mut &str) -> ModalResult<ParsedTaskMetadata> {
@@ -290,9 +295,10 @@ fn parse_on_completion_field(input: &mut &str) -> ModalResult<ParsedTaskMetadata
     let _ = space0.parse_next(input)?;
     let value: &str = take_while(1.., |c: char| !c.is_whitespace()).parse_next(input)?;
 
-    let mut meta = ParsedTaskMetadata::default();
-    meta.on_completion = Some(value.trim().to_ascii_lowercase());
-    Ok(meta)
+    Ok(ParsedTaskMetadata {
+        on_completion: Some(value.trim().to_ascii_lowercase()),
+        ..Default::default()
+    })
 }
 
 fn parse_id_field(input: &mut &str) -> ModalResult<ParsedTaskMetadata> {
@@ -300,9 +306,10 @@ fn parse_id_field(input: &mut &str) -> ModalResult<ParsedTaskMetadata> {
     let _ = space0.parse_next(input)?;
     let id = parse_task_id(input)?;
 
-    let mut meta = ParsedTaskMetadata::default();
-    meta.id = Some(id.to_string());
-    Ok(meta)
+    Ok(ParsedTaskMetadata {
+        id: Some(id.to_string()),
+        ..Default::default()
+    })
 }
 
 fn parse_depends_on_field(input: &mut &str) -> ModalResult<ParsedTaskMetadata> {
@@ -310,9 +317,10 @@ fn parse_depends_on_field(input: &mut &str) -> ModalResult<ParsedTaskMetadata> {
     let _ = space0.parse_next(input)?;
     let value: &str = take_while(1.., |c: char| !c.is_whitespace()).parse_next(input)?;
 
-    let mut meta = ParsedTaskMetadata::default();
-    meta.depends_on = split_dependency_ids(value);
-    Ok(meta)
+    Ok(ParsedTaskMetadata {
+        depends_on: split_dependency_ids(value),
+        ..Default::default()
+    })
 }
 
 fn parse_task_id<'i>(input: &mut &'i str) -> ModalResult<&'i str> {
@@ -404,9 +412,10 @@ fn parse_priority_emoji(input: &mut &str) -> ModalResult<ParsedTaskMetadata> {
     ))
     .parse_next(input)?;
 
-    let mut meta = ParsedTaskMetadata::default();
-    meta.priority = Some(priority);
-    Ok(meta)
+    Ok(ParsedTaskMetadata {
+        priority: Some(priority),
+        ..Default::default()
+    })
 }
 
 fn parse_tag_field(input: &mut &str) -> ModalResult<ParsedTaskMetadata> {
@@ -430,9 +439,10 @@ fn parse_block_ref_field(input: &mut &str) -> ModalResult<ParsedTaskMetadata> {
     let id: &str =
         take_while(1.., |c: char| c.is_alphanumeric() || c == '-' || c == '_').parse_next(input)?;
 
-    let mut meta = ParsedTaskMetadata::default();
-    meta.block_ref = Some(id.to_string());
-    Ok(meta)
+    Ok(ParsedTaskMetadata {
+        block_ref: Some(id.to_string()),
+        ..Default::default()
+    })
 }
 
 fn starts_metadata_token(s: &str) -> bool {

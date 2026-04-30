@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use crate::task_parser::ParsedTaskMetadata;
 
 /// Position in source text (line, column, byte offset)
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct SourcePosition {
     pub line: usize,
     pub column: usize,
@@ -289,11 +289,12 @@ impl TaskItem {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TaskPriority {
     Lowest,
     Low,
+    #[default]
     Normal,
     Medium,
     High,
@@ -333,11 +334,6 @@ impl TaskPriority {
     }
 }
 
-impl Default for TaskPriority {
-    fn default() -> Self {
-        TaskPriority::Normal
-    }
-}
 
 impl fmt::Display for TaskPriority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -357,7 +353,7 @@ impl fmt::Display for TaskPriority {
 pub struct TaskBuilder {
     pub content: String,
     pub is_completed: bool,
-    pub position: Option<SourcePosition>,
+    pub position: SourcePosition,
 }
 
 impl TaskBuilder {
@@ -366,10 +362,9 @@ impl TaskBuilder {
         let task_item = TaskItem::from_parsed_metadata(
             parsed,
             std::mem::take(&mut self.is_completed),
-            self.position.expect("Must have position."),
+            std::mem::take(&mut self.position),
         );
         self.content.clear();
-        self.position = None;
         task_item
     }
 }
