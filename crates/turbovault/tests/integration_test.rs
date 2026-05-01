@@ -206,33 +206,69 @@ mod tests {
         assert!(!t.is_completed);
         assert_eq!(t.priority, TaskPriority::Highest);
         assert_eq!(t.recurrence.as_deref(), Some("every day"));
-        assert_eq!(t.start_date.map(|d| d.to_string()).as_deref(), Some("2026-04-30"));
-        assert_eq!(t.scheduled_date.map(|d| d.to_string()).as_deref(), Some("2026-04-30"));
-        assert_eq!(t.due_date.map(|d| d.to_string()).as_deref(), Some("2026-04-30"));
+        assert_eq!(
+            t.start_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-04-30")
+        );
+        assert_eq!(
+            t.scheduled_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-04-30")
+        );
+        assert_eq!(
+            t.due_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-04-30")
+        );
 
         let t = find("Feed the cat");
         assert!(!t.is_completed);
         assert_eq!(t.priority, TaskPriority::High);
         assert_eq!(t.recurrence.as_deref(), Some("every day"));
-        assert_eq!(t.start_date.map(|d| d.to_string()).as_deref(), Some("2026-04-30"));
-        assert_eq!(t.scheduled_date.map(|d| d.to_string()).as_deref(), Some("2026-04-30"));
-        assert_eq!(t.due_date.map(|d| d.to_string()).as_deref(), Some("2026-04-30"));
+        assert_eq!(
+            t.start_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-04-30")
+        );
+        assert_eq!(
+            t.scheduled_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-04-30")
+        );
+        assert_eq!(
+            t.due_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-04-30")
+        );
 
         let t = find("Clean the kitchen");
         assert_eq!(t.priority, TaskPriority::Normal);
         assert_eq!(t.recurrence.as_deref(), Some("every week"));
-        assert_eq!(t.start_date.map(|d| d.to_string()).as_deref(), Some("2026-04-30"));
-        assert_eq!(t.scheduled_date.map(|d| d.to_string()).as_deref(), Some("2026-04-30"));
-        assert_eq!(t.due_date.map(|d| d.to_string()).as_deref(), Some("2026-04-30"));
+        assert_eq!(
+            t.start_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-04-30")
+        );
+        assert_eq!(
+            t.scheduled_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-04-30")
+        );
+        assert_eq!(
+            t.due_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-04-30")
+        );
         assert_eq!(t.tags, vec!["task_type_1"]);
 
         // task_type_2 task also tests the double-space after 🛫 (🛫  2026-04-30)
         let t = find("Clean the baseboards");
         assert_eq!(t.priority, TaskPriority::Low);
         assert_eq!(t.recurrence.as_deref(), Some("every week"));
-        assert_eq!(t.start_date.map(|d| d.to_string()).as_deref(), Some("2026-04-30"));
-        assert_eq!(t.scheduled_date.map(|d| d.to_string()).as_deref(), Some("2026-04-30"));
-        assert_eq!(t.due_date.map(|d| d.to_string()).as_deref(), Some("2026-04-30"));
+        assert_eq!(
+            t.start_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-04-30")
+        );
+        assert_eq!(
+            t.scheduled_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-04-30")
+        );
+        assert_eq!(
+            t.due_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-04-30")
+        );
         assert_eq!(t.tags, vec!["task_type_2"]);
 
         // --- Dataview format ---
@@ -240,30 +276,51 @@ mod tests {
         let t = find("Buy groceries");
         assert!(!t.is_completed);
         assert_eq!(t.priority, TaskPriority::Medium);
-        assert_eq!(t.due_date.map(|d| d.to_string()).as_deref(), Some("2026-05-01"));
+        assert_eq!(
+            t.due_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-05-01")
+        );
         assert_eq!(t.tags, vec!["errands"]);
 
         // --- Mixed emoji + Dataview ---
 
         let t = find("Write weekly report");
         assert!(!t.is_completed);
-        assert_eq!(t.due_date.map(|d| d.to_string()).as_deref(), Some("2026-05-10"));
-        assert_eq!(t.scheduled_date.map(|d| d.to_string()).as_deref(), Some("2026-05-08"));
+        assert_eq!(
+            t.due_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-05-10")
+        );
+        assert_eq!(
+            t.scheduled_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-05-08")
+        );
         assert_eq!(t.recurrence.as_deref(), Some("every week"));
 
         // --- Completed task with done date ---
 
         let t = find("Submit expense report");
         assert!(t.is_completed);
-        assert_eq!(t.done_date.map(|d| d.to_string()).as_deref(), Some("2026-04-29"));
-        assert_eq!(t.due_date.map(|d| d.to_string()).as_deref(), Some("2026-04-28"));
+        assert_eq!(
+            t.done_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-04-29")
+        );
+        assert_eq!(
+            t.due_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-04-28")
+        );
 
         // --- Comma-separated Dataview fields with ID ---
 
         let t = find("Plan sprint");
         assert_eq!(t.priority, TaskPriority::High);
-        assert_eq!(t.start_date.map(|d| d.to_string()).as_deref(), Some("2026-05-01"));
-        assert_eq!(t.due_date.map(|d| d.to_string()).as_deref(), Some("2026-05-07"));
+        assert_eq!(
+            t.start_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-05-01")
+        );
+        assert_eq!(
+            t.due_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-05-07")
+        );
         assert_eq!(t.id.as_deref(), Some("sprint-42"));
     }
 }
