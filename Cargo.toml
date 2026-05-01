@@ -55,6 +55,7 @@ walkdir = "2"
 
 # Parsing utilities
 regex = "1"
+winnow = "1.0.2"
 
 # Error handling
 thiserror = "2.0"

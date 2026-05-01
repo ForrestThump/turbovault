@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 use turbovault_core::{
     Callout, CalloutType, Frontmatter, Heading, LineIndex, Link, LinkType, SourcePosition,
-    Tag as OFMTag, TaskItem,
+    Tag as OFMTag, TaskBuilder, TaskItem,
 };
 
 use crate::ParseOptions;
@@ -266,10 +266,10 @@ impl<'a> ParseEngine<'a> {
         let mut current_heading: Option<(HeadingLevel, Option<String>)> = None;
         let mut heading_text = String::new();
         let mut heading_start: usize = 0;
-        let mut in_task_item = false;
-        let mut task_checked = false;
-        let mut task_content = String::new();
-        let mut task_start: usize = 0;
+
+        let mut in_task_item: bool = false;
+        let mut task_builder: TaskBuilder = TaskBuilder::default();
+
         let mut current_link: Option<(String, String)> = None; // (url, title)
         let mut link_text = String::new();
         let mut link_start: usize = 0;
@@ -365,7 +365,7 @@ impl<'a> ParseEngine<'a> {
                 Event::TaskListMarker(_checked) if options.parse_tasks => {
                     in_task_item = true;
                     // Read raw marker byte to detect extended states [/] [-]
-                    task_checked = {
+                    task_builder.is_completed = {
                         let raw_marker = self
                             .content
                             .as_bytes()
@@ -374,27 +374,22 @@ impl<'a> ParseEngine<'a> {
                             .unwrap_or(b' ') as char;
                         crate::models::TaskStatus::from_marker(raw_marker).is_completed()
                     };
-                    task_content.clear();
-                    task_start = range.start;
+                    task_builder.position = SourcePosition::from_offset_indexed(
+                        &self.index,
+                        range.start,
+                        range.end - range.start,
+                    );
                 }
+
                 Event::End(TagEnd::Item) if in_task_item => {
                     in_task_item = false;
-                    if !task_content.is_empty() {
-                        result.tasks.push(TaskItem {
-                            content: task_content.trim().to_string(),
-                            is_completed: task_checked,
-                            position: SourcePosition::from_offset_indexed(
-                                &self.index,
-                                task_start,
-                                range.end - task_start,
-                            ),
-                            due_date: None,
-                        });
+                    if !task_builder.content.is_empty() {
+                        result.tasks.push(task_builder.build());
                     }
-                    task_content.clear();
                 }
+
                 Event::Text(text) if in_task_item => {
-                    task_content.push_str(&text);
+                    task_builder.content.push_str(&text);
                 }
 
                 // === Markdown Links ===
@@ -1493,6 +1488,102 @@ Back to normal [[Valid]]
             0,
             "pulldown-cmark does not recognise [-] as a task marker; \
              non-standard markers are not emitted as TaskListMarker events"
+        );
+    }
+
+    #[test]
+    fn test_task_priority_parsing() {
+        use turbovault_core::TaskPriority;
+
+        let content = "\
+# Some header
+
+Some text here.
+- [ ] A lowest priority task ⏬
+- [ ] A low priority task 🔽
+- [ ] A task with double priority ⏬ 🔺
+- [ ] A normal priority task
+- [ ] A medium priority task 🔼
+- [ ] A high priority task ⏫
+- [ ] A highest priority task 🔺
+";
+        let engine = ParseEngine::new(content);
+        let result = engine.parse(&ParseOptions::all());
+
+        assert_eq!(result.tasks.len(), 7,);
+
+        assert_eq!(
+            result.tasks[0].priority,
+            TaskPriority::Lowest,
+            "Should parse ⏬ as lowest priority marker"
+        );
+        assert_eq!(result.tasks[0].content, "A lowest priority task");
+
+        assert_eq!(
+            result.tasks[1].priority,
+            TaskPriority::Low,
+            "Should parse 🔽 as low priority marker"
+        );
+        assert_eq!(result.tasks[1].content, "A low priority task");
+
+        assert_eq!(
+            result.tasks[2].priority,
+            TaskPriority::Normal,
+            "Should parse double marker as normal priority"
+        );
+        assert_eq!(result.tasks[2].content, "A task with double priority ⏬ 🔺");
+
+        assert_eq!(
+            result.tasks[3].priority,
+            TaskPriority::Normal,
+            "Should parse no marker as normal priority"
+        );
+
+        assert_eq!(
+            result.tasks[4].priority,
+            TaskPriority::Medium,
+            "Should parse 🔼 marker as medium priority"
+        );
+
+        assert_eq!(
+            result.tasks[5].priority,
+            TaskPriority::High,
+            "Should parse ⏫ marker as high priority"
+        );
+
+        assert_eq!(
+            result.tasks[6].priority,
+            TaskPriority::Highest,
+            "Should parse 🔺 marker as highest priority"
+        );
+    }
+
+    #[test]
+    fn test_task_metadata_parsing() {
+        let content = "- [ ] Review PR [due:: 2026-05-01], [project:: [[Team Work]]], [id:: pr-123], [dependsOn:: abc123,def456] 🔁 every weekday #review ^pr-123";
+        let engine = ParseEngine::new(content);
+        let result = engine.parse(&ParseOptions::all());
+
+        assert_eq!(result.tasks.len(), 1);
+        assert_eq!(result.tasks[0].content, "Review PR");
+        assert_eq!(
+            result.tasks[0]
+                .due_date
+                .map(|date| date.to_string())
+                .as_deref(),
+            Some("2026-05-01")
+        );
+        assert_eq!(result.tasks[0].recurrence.as_deref(), Some("every weekday"));
+        assert_eq!(result.tasks[0].id.as_deref(), Some("pr-123"));
+        assert_eq!(
+            result.tasks[0].depends_on,
+            vec!["abc123".to_string(), "def456".to_string()]
+        );
+        assert_eq!(result.tasks[0].tags, vec!["review".to_string()]);
+        assert_eq!(result.tasks[0].block_ref.as_deref(), Some("pr-123"));
+        assert_eq!(
+            result.tasks[0].metadata.get("project").map(String::as_str),
+            Some("[[Team Work]]")
         );
     }
 }

@@ -82,6 +82,7 @@ pub mod models;
 pub mod multi_vault;
 pub mod profiles;
 pub mod resilience;
+pub mod task_parser;
 pub mod utils;
 pub mod validation;
 
