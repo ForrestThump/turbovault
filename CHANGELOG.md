@@ -5,13 +5,22 @@ All notable changes to TurboVault will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.4.1] - 2026-04-16
+## [1.4.1] - 2026-04-20
+
+### Fixed
+
+- **Inline code rendering in headings, blockquotes, and tables** ([#15](https://github.com/Epistates/turbovault/pull/15)): Backticks in headings no longer leak into the following paragraph; backticks in blockquotes and table cells are preserved for re-parse and downstream renderers.
 
 ### Changed
 
-- **Dependency refresh**: Updated all workspace dependencies to latest versions, including major-version bumps: `thiserror` 1.0 → 2.0, `config` 0.14 → 0.15, `dashmap` 5.5 → 6.1, `notify` 6 → 8, `petgraph` 0.6 → 0.8, `tantivy` 0.22 → 0.26, `similar` 2.7 → 3.1, and `turbomcp` 3.0.11 → 3.0.14.
+- **Dependency refresh**: Updated all workspace dependencies to latest versions, including major-version bumps: `thiserror` 1.0 → 2.0, `config` 0.14 → 0.15, `dashmap` 5.5 → 6.1, `notify` 6 → 8, `petgraph` 0.6 → 0.8, `tantivy` 0.22 → 0.26, `similar` 2.7 → 3.1, and `turbomcp` 3.0.11 → 3.1.0.
 - **Tantivy 0.26 API migration**: `TopDocs::with_limit(n)` now requires `.order_by_score()` to produce a `Collector`.
 - **Similar 3.1 API migration**: `TextDiff` dropped the third lifetime parameter.
+- **turbomcp hoisted to workspace dependency**: Unified `turbovault-tools` and `turbovault` binary on turbomcp 3.1.0 (previously mismatched at 3.0.14 and 3.1.0).
+
+### Added
+
+- **Regression tests for PR #15**: Cover inline code in headings, blockquotes, and table cells, plus a `ParseEngine` outline test.
 
 ## [1.4.0] - 2026-04-08
 
