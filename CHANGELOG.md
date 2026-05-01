@@ -5,6 +5,23 @@ All notable changes to TurboVault will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-05-01
+
+### Added
+
+- **Obsidian Tasks metadata parsing** ([#17](https://github.com/Epistates/turbovault/pull/17)): New `turbovault-core::task_parser` module (winnow-based) extracts trailing task metadata in both Obsidian Tasks emoji format and Dataview inline-field format, without requiring vault-level configuration. `TaskItem` now exposes `created_date`, `scheduled_date`, `start_date`, `due_date`, `done_date`, `cancelled_date`, `priority` (typed `TaskPriority`), `recurrence`, `on_completion`, `id`, `depends_on`, `tags`, `block_ref`, and a `metadata` map for custom Dataview fields.
+- **`TaskPriority` enum**: Stable `SCREAMING_SNAKE_CASE` serde representation (e.g. `"HIGH"`), with emoji and `char` round-trip helpers.
+- **Windows test compatibility** ([#16](https://github.com/Epistates/turbovault/pull/16)): `test_file_tools_delete_locked_file` and the atomic rollback test now compile and pass on Windows runners; rollback assertion is gated `not(windows)` so macOS still verifies it.
+
+### Changed
+
+- **BREAKING — `TaskItem` schema**: `due_date` changed from `Option<String>` to `Option<NaiveDate>`. New typed date fields (`created_date`, `scheduled_date`, etc.) replace ad-hoc string parsing. Legacy JSON without the new fields still deserializes (all new fields are `#[serde(default)]`); legacy JSON with `due_date` as a non-ISO-date string will now fail to parse.
+- **Dependency refresh**: `turbomcp` 3.1.0 → 3.1.2, `tantivy` 0.26.0 → 0.26.1, `rustls` 0.23.38 → 0.23.40, `rustls-platform-verifier` 0.6.2 → 0.7.0, `reqwest` 0.13.2 → 0.13.3, plus assorted patch updates across `wasm-bindgen`, `metrics`, `rkyv`, `cc`, `libc`, and others.
+
+### Security
+
+- **RUSTSEC-2026-0104** (`rustls-webpki` reachable panic in CRL parsing): bumped to 0.103.13 transitively via `cargo update`.
+
 ## [1.4.1] - 2026-04-20
 
 ### Fixed
