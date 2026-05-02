@@ -662,6 +662,16 @@ mod tests {
     }
 
     #[test]
+    fn parses_tag_at_start_of_task_content() {
+        let task = parse_task_line("- [ ] #task This is the task content 📅 2026-05-01 🔺").unwrap();
+
+        assert_eq!(task.description, "This is the task content");
+        assert_eq!(task.due.as_deref(), Some("2026-05-01"));
+        assert_eq!(task.priority, Some('🔺'));
+        assert_eq!(task.tags, vec!["task".to_string()]);
+    }
+
+    #[test]
     fn ignores_false_positive_in_description() {
         let task =
             parse_task_line("- [ ] Review the [due date] section and 📅 2025-04-30").unwrap();
