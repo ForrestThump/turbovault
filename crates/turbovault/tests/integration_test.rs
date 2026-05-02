@@ -323,4 +323,47 @@ mod tests {
         );
         assert_eq!(t.id.as_deref(), Some("sprint-42"));
     }
+
+    #[tokio::test]
+    async fn test_list_tasks_mcp_tool() {
+        let (_temp, manager) = create_task_vault().await;
+
+        let files = manager.scan_vault().await.expect("scan vault");
+        let mut all_tasks: Vec<serde_json::Value> = Vec::new();
+
+        for file_path in files {
+            if !file_path.to_string_lossy().ends_with(".md") {
+                continue;
+            }
+            let vault_file = manager.parse_file(&file_path).await.expect("parse file");
+            for task in vault_file.tasks {
+                all_tasks.push(serde_json::json!({
+                    "content": task.content,
+                    "is_completed": task.is_completed,
+                    "path": file_path.to_string_lossy().to_string(),
+                    "priority": task.priority,
+                    "tags": task.tags,
+                }));
+            }
+        }
+
+        assert_eq!(all_tasks.len(), 8, "expected 8 tasks");
+
+        let find_task = |content: &str| {
+            all_tasks
+                .iter()
+                .find(|t| t["content"] == content)
+                .expect(&format!("task not found: {content}"))
+        };
+
+        let pending_task = find_task("Take out the trash");
+        assert_eq!(pending_task["is_completed"], false);
+
+        let completed_task = find_task("Submit expense report");
+        assert_eq!(completed_task["is_completed"], true);
+
+        let tag_task = find_task("Clean the kitchen #task_type_1");
+        let tags = tag_task["tags"].as_array().expect("tags array");
+        assert!(tags.iter().any(|t| t == "task_type_1"));
+    }
 }

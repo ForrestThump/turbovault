@@ -2125,6 +2125,118 @@ impl ObsidianMcpServer {
         response.to_json()
     }
 
+    // ==================== Tasks ====================
+
+    /// List all tasks in the active vault
+    #[tool(
+        description = "List all task items from markdown files in the vault with their status, priority, dates, and metadata",
+        usage = "Use to get a complete overview of all tasks across all notes in the vault. Supports filtering by status (completed, pending, all)",
+        performance = "Moderate - parses all markdown files in vault",
+        related = ["read_note"],
+        examples = [
+            "List all tasks",
+            "Get all pending tasks only",
+            "Show completed tasks"
+        ]
+    )]
+    async fn list_tasks(
+        &self,
+        status_filter: Option<String>,
+        tag_filters: Option<Vec<String>>,
+    ) -> McpResult<serde_json::Value> {
+        let (vault_name, manager) = self.get_vault_pair().await?;
+        let files = manager.scan_vault().await.map_err(to_mcp_error)?;
+
+        let status = status_filter.unwrap_or_else(|| "all".to_string());
+        let status_lowercase = status.to_lowercase();
+
+        let normalize_tag = |tf: String| -> Option<String> {
+            let mut tag = if tf.starts_with('#') {
+                tf
+            } else {
+                format!("#{}", tf)
+            };
+            tag = tag.to_lowercase();
+            tag.retain(|c| !c.is_whitespace());
+
+            if tag.len() <= 1 || tag[1..].chars().all(|c| c.is_ascii_digit()) {
+                None
+            } else {
+                Some(tag)
+            }
+        };
+
+        let tag_filters: Vec<String> = tag_filters
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(normalize_tag)
+            .collect();
+
+        let mut all_tasks: Vec<serde_json::Value> = Vec::new();
+
+        for file_path in files {
+            if !file_path.to_string_lossy().ends_with(".md") {
+                continue;
+            }
+
+            let vault_file = match manager.parse_file(&file_path).await {
+                Ok(vf) => vf,
+                Err(_) => continue,
+            };
+
+            for task in vault_file.tasks {
+                let is_completed = task.is_completed;
+
+                let passes_status = match status_lowercase.as_str() {
+                    "completed" => is_completed,
+                    "pending" | "open" | "todo" => !is_completed,
+                    _ => true,
+                };
+
+                if !passes_status {
+                    continue;
+                }
+
+                let passes_tags = tag_filters.is_empty()
+                    || tag_filters.iter().all(|required| {
+                        let bare = required.trim_start_matches('#');
+                        task.tags.iter().any(|t| t.eq_ignore_ascii_case(bare))
+                    });
+
+                if passes_tags {
+                    all_tasks.push(serde_json::json!({
+                        "content": task.content,
+                        "is_completed": is_completed,
+                        "path": file_path.to_string_lossy().to_string(),
+                        "position": task.position,
+                        "priority": task.priority,
+                        "due_date": task.due_date.map(|d| d.to_string()),
+                        "scheduled_date": task.scheduled_date.map(|d| d.to_string()),
+                        "start_date": task.start_date.map(|d| d.to_string()),
+                        "done_date": task.done_date.map(|d| d.to_string()),
+                        "recurrence": task.recurrence,
+                        "tags": task.tags,
+                        "depends_on": task.depends_on,
+                    }));
+                }
+            }
+        }
+
+        let count = all_tasks.len();
+        let response = StandardResponse::new(
+            vault_name,
+            "list_tasks",
+            serde_json::json!({
+                "tasks": all_tasks,
+                "status_filter": status,
+                "tag_filters": tag_filters,
+            }),
+        )
+        .with_count(count)
+        .with_next_step("read_note");
+
+        response.to_json()
+    }
     // ==================== Resources (OFM Knowledge Injection) ====================
 
     /// Complete Obsidian Flavored Markdown syntax guide
