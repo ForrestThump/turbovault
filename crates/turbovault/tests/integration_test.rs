@@ -236,7 +236,7 @@ mod tests {
             Some("2026-04-30")
         );
 
-        let t = find("Clean the kitchen");
+        let t = find("Clean the kitchen #task_type_1");
         assert_eq!(t.priority, TaskPriority::Normal);
         assert_eq!(t.recurrence.as_deref(), Some("every week"));
         assert_eq!(
@@ -254,7 +254,7 @@ mod tests {
         assert_eq!(t.tags, vec!["task_type_1"]);
 
         // task_type_2 task also tests the double-space after 🛫 (🛫  2026-04-30)
-        let t = find("Clean the baseboards");
+        let t = find("Clean the baseboards #task_type_2");
         assert_eq!(t.priority, TaskPriority::Low);
         assert_eq!(t.recurrence.as_deref(), Some("every week"));
         assert_eq!(
@@ -273,7 +273,7 @@ mod tests {
 
         // --- Dataview format ---
 
-        let t = find("Buy groceries");
+        let t = find("Buy groceries #errands");
         assert!(!t.is_completed);
         assert_eq!(t.priority, TaskPriority::Medium);
         assert_eq!(
