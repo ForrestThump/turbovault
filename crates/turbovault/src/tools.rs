@@ -2130,13 +2130,15 @@ impl ObsidianMcpServer {
     /// List all tasks in the active vault
     #[tool(
         description = "List all task items from markdown files in the vault with their status, priority, dates, and metadata",
-        usage = "Use to get a complete overview of all tasks across all notes in the vault. Supports filtering by status (completed, pending, all)",
+        usage = "Use to get a complete overview of all tasks across all notes in the vault. Filter by status using status_filter: 'completed' or 'done' for finished tasks; 'pending', 'incomplete', 'open', or 'todo' for unfinished tasks; omit or pass 'all' to return everything. Filter by one or more tags using tag_filters (# prefix optional, AND logic — all tags must match).",
         performance = "Moderate - parses all markdown files in vault",
         related = ["read_note"],
         examples = [
-            "List all tasks",
-            "Get all pending tasks only",
-            "Show completed tasks"
+            "status_filter: 'pending'",
+            "status_filter: 'completed'",
+            "status_filter: 'incomplete'",
+            "tag_filters: ['work', 'urgent']",
+            "status_filter: 'pending', tag_filters: ['#errands']"
         ]
     )]
     async fn list_tasks(
@@ -2188,8 +2190,8 @@ impl ObsidianMcpServer {
                 let is_completed = task.is_completed;
 
                 let passes_status = match status_lowercase.as_str() {
-                    "completed" => is_completed,
-                    "pending" | "open" | "todo" => !is_completed,
+                    "completed" | "done" => is_completed,
+                    "pending" | "open" | "todo" | "incomplete" => !is_completed,
                     _ => true,
                 };
 
