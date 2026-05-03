@@ -577,6 +577,306 @@ mod tests {
         assert!(result.is_err(), "write with stale hash should fail");
     }
 
+    // ==================== complete_task Tests ====================
+
+    /// Simulate the complete_task tool: mark done + optionally spawn next occurrence.
+    /// Returns the next-occurrence line if recurrence was detected and handled.
+    async fn apply_task_complete(
+        manager: &VaultManager,
+        file_path: &PathBuf,
+        task_content: &str,
+        done: chrono::NaiveDate,
+    ) -> Option<String> {
+        let vault_file = manager.parse_file(file_path).await.expect("parse");
+        let mut task = vault_file
+            .tasks
+            .iter()
+            .find(|t| t.content == task_content)
+            .unwrap_or_else(|| panic!("task not found: {task_content:?}"))
+            .clone();
+
+        let content = manager.read_file(file_path).await.expect("read");
+        let hash = turbovault_vault::compute_hash(&content);
+        let line_sep = if content.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        let mut lines: Vec<String> = content.split(line_sep).map(|s| s.to_string()).collect();
+
+        let line_idx = task.position.line - 1;
+        let original = &lines[line_idx].clone();
+        let indent_len = original.len() - original.trim_start().len();
+        let indent = original[..indent_len].to_string();
+
+        task.is_completed = true;
+        task.done_date = Some(done);
+        lines[line_idx] = format!("{}{}", indent, task.to_markdown_line());
+
+        // Spawn next occurrence if recurring
+        let mut spawned_line: Option<String> = None;
+        if let Some(ref rec) = task.recurrence.clone() {
+            let reference = task.due_date.unwrap_or(done);
+            let next_due = match rec.as_str() {
+                s if s.contains("every day") => Some(reference + chrono::Duration::days(1)),
+                s if s.contains("every week") => Some(reference + chrono::Duration::days(7)),
+                _ => None,
+            };
+            if let Some(nd) = next_due {
+                let offset = nd.signed_duration_since(reference);
+                let mut next = task.clone();
+                next.is_completed = false;
+                next.done_date = None;
+                next.due_date = Some(nd);
+                next.scheduled_date = task.scheduled_date.map(|d| d + offset);
+                next.start_date = task.start_date.map(|d| d + offset);
+                let line = format!("{}{}", indent, next.to_markdown_line());
+                lines.insert(line_idx + 1, line.clone());
+                spawned_line = Some(line);
+            }
+        }
+
+        let new_content = lines.join(line_sep);
+        manager
+            .write_file(file_path, &new_content, Some(&hash))
+            .await
+            .expect("write");
+
+        spawned_line
+    }
+
+    #[tokio::test]
+    async fn test_complete_task_spawns_next_occurrence() {
+        use chrono::NaiveDate;
+        let (_temp, manager) = create_task_vault().await;
+        let file_path = PathBuf::from("TestFolder/Tasks.md");
+
+        // Verify initial state
+        let vault_file = manager.parse_file(&file_path).await.expect("parse");
+        assert_eq!(vault_file.tasks.len(), 8);
+        let task = vault_file
+            .tasks
+            .iter()
+            .find(|t| t.content == "Feed the cat")
+            .expect("find task");
+        assert!(!task.is_completed);
+        assert_eq!(task.recurrence.as_deref(), Some("every day"));
+        assert_eq!(
+            task.due_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-04-30")
+        );
+
+        let done = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
+        let next_line = apply_task_complete(&manager, &file_path, "Feed the cat", done).await;
+
+        assert!(
+            next_line.is_some(),
+            "expected next occurrence to be spawned"
+        );
+
+        // Re-parse: should now have 9 tasks (completed + spawned)
+        let vault_file2 = manager.parse_file(&file_path).await.expect("re-parse");
+        assert_eq!(
+            vault_file2.tasks.len(),
+            9,
+            "expected 9 tasks after spawning next occurrence"
+        );
+
+        // Completed instance
+        let completed = vault_file2
+            .tasks
+            .iter()
+            .find(|t| t.content == "Feed the cat" && t.is_completed)
+            .expect("completed task");
+        assert_eq!(
+            completed.done_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-05-02")
+        );
+
+        // Spawned pending instance — due date advances by 1 day from 2026-04-30
+        let spawned = vault_file2
+            .tasks
+            .iter()
+            .find(|t| t.content == "Feed the cat" && !t.is_completed)
+            .expect("spawned next occurrence");
+        assert!(!spawned.is_completed);
+        assert_eq!(
+            spawned.due_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-05-01")
+        );
+        assert_eq!(spawned.recurrence.as_deref(), Some("every day"));
+        assert_eq!(spawned.priority, TaskPriority::High);
+    }
+
+    #[tokio::test]
+    async fn test_complete_task_no_recurrence_preserves_count() {
+        use chrono::NaiveDate;
+        let (_temp, manager) = create_task_vault().await;
+        let file_path = PathBuf::from("TestFolder/Tasks.md");
+
+        let vault_file = manager.parse_file(&file_path).await.expect("parse");
+        let count_before = vault_file.tasks.len();
+
+        let task = vault_file
+            .tasks
+            .iter()
+            .find(|t| t.content == "Buy groceries #errands")
+            .expect("find task");
+        assert!(task.recurrence.is_none());
+
+        let done = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
+        let next_line =
+            apply_task_complete(&manager, &file_path, "Buy groceries #errands", done).await;
+
+        assert!(
+            next_line.is_none(),
+            "non-recurring task should not spawn next occurrence"
+        );
+
+        let vault_file2 = manager.parse_file(&file_path).await.expect("re-parse");
+        assert_eq!(
+            vault_file2.tasks.len(),
+            count_before,
+            "task count should not change for non-recurring tasks"
+        );
+
+        let updated = vault_file2
+            .tasks
+            .iter()
+            .find(|t| t.content == "Buy groceries #errands")
+            .expect("find updated");
+        assert!(updated.is_completed);
+        assert_eq!(
+            updated.done_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-05-02")
+        );
+    }
+
+    // ==================== get_overdue_tasks Tests ====================
+
+    /// Collect overdue tasks as of a given date — mirrors get_overdue_tasks logic.
+    async fn collect_overdue(
+        manager: &VaultManager,
+        as_of: chrono::NaiveDate,
+    ) -> Vec<(String, chrono::NaiveDate)> {
+        let files = manager.scan_vault().await.expect("scan");
+        let mut overdue: Vec<(String, chrono::NaiveDate)> = Vec::new();
+        for file_path in &files {
+            if !file_path.to_string_lossy().ends_with(".md") {
+                continue;
+            }
+            let vault_file = match manager.parse_file(file_path).await {
+                Ok(vf) => vf,
+                Err(_) => continue,
+            };
+            for task in vault_file.tasks {
+                if task.is_completed {
+                    continue;
+                }
+                if let Some(due) = task.due_date {
+                    if due < as_of {
+                        overdue.push((task.content, due));
+                    }
+                }
+            }
+        }
+        overdue.sort_by_key(|(_, d)| *d);
+        overdue
+    }
+
+    #[tokio::test]
+    async fn test_get_overdue_tasks_as_of_date() {
+        use chrono::NaiveDate;
+        let (_temp, manager) = create_task_vault().await;
+
+        let as_of = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
+        let overdue = collect_overdue(&manager, as_of).await;
+
+        // Pending tasks with due_date < 2026-05-02:
+        //   "Take out the trash"          due 2026-04-30
+        //   "Feed the cat"                due 2026-04-30
+        //   "Clean the kitchen #..."      due 2026-04-30
+        //   "Clean the baseboards #..."   due 2026-04-30
+        //   "Buy groceries #errands"      due 2026-05-01
+        let contents: Vec<&str> = overdue.iter().map(|(c, _)| c.as_str()).collect();
+        assert_eq!(
+            overdue.len(),
+            5,
+            "expected 5 overdue tasks as of {as_of}, got: {contents:?}"
+        );
+        assert!(
+            contents.iter().any(|c| *c == "Take out the trash"),
+            "missing 'Take out the trash'"
+        );
+        assert!(
+            contents.iter().any(|c| *c == "Feed the cat"),
+            "missing 'Feed the cat'"
+        );
+        assert!(
+            contents
+                .iter()
+                .any(|c| *c == "Clean the kitchen #task_type_1"),
+            "missing 'Clean the kitchen #task_type_1'"
+        );
+        assert!(
+            contents
+                .iter()
+                .any(|c| *c == "Clean the baseboards #task_type_2"),
+            "missing 'Clean the baseboards #task_type_2'"
+        );
+        assert!(
+            contents.iter().any(|c| *c == "Buy groceries #errands"),
+            "missing 'Buy groceries #errands'"
+        );
+
+        // Completed or future-due tasks must NOT appear
+        assert!(
+            !contents.iter().any(|c| *c == "Submit expense report"),
+            "completed task should not be overdue"
+        );
+        assert!(
+            !contents.iter().any(|c| *c == "Write weekly report"),
+            "future task (due 2026-05-10) should not be overdue as of {as_of}"
+        );
+        assert!(
+            !contents.iter().any(|c| *c == "Plan sprint"),
+            "future task (due 2026-05-07) should not be overdue as of {as_of}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_overdue_tasks_empty_before_all_due_dates() {
+        use chrono::NaiveDate;
+        let (_temp, manager) = create_task_vault().await;
+
+        // All tasks in TASKS_MD have due dates in April–May 2026; nothing is overdue in January
+        let as_of = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let overdue = collect_overdue(&manager, as_of).await;
+
+        assert!(
+            overdue.is_empty(),
+            "expected no overdue tasks as of {as_of}, got: {:?}",
+            overdue
+                .iter()
+                .map(|(c, d)| format!("{c} (due {d})"))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_overdue_tasks_sorted_oldest_first() {
+        use chrono::NaiveDate;
+        let (_temp, manager) = create_task_vault().await;
+
+        let as_of = NaiveDate::from_ymd_opt(2026, 5, 2).unwrap();
+        let overdue = collect_overdue(&manager, as_of).await;
+
+        let dates: Vec<_> = overdue.iter().map(|(_, d)| *d).collect();
+        let mut sorted = dates.clone();
+        sorted.sort();
+        assert_eq!(dates, sorted, "overdue tasks should be sorted oldest-first");
+    }
+
     #[tokio::test]
     async fn test_list_tasks_mcp_tool() {
         let (_temp, manager) = create_task_vault().await;

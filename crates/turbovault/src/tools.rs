@@ -72,6 +72,164 @@ fn apply_date_field(
     Ok(())
 }
 
+/// Load raw file content and locate the typed `TaskItem` at `position` for in-place editing.
+///
+/// Validates the hash if provided, splits lines preserving the original line-ending style,
+/// bounds-checks `position`, confirms the line is a task checkbox, extracts leading indentation,
+/// and parses the file to return the typed task. Shared by `update_task` and `complete_task`.
+///
+/// Returns `(line_sep, raw_lines, indent, task)`.
+async fn read_task_for_update(
+    manager: &std::sync::Arc<VaultManager>,
+    file_path: &Path,
+    position: usize,
+    expected_hash: Option<&str>,
+) -> McpResult<(String, Vec<String>, String, turbovault_core::TaskItem)> {
+    let content = manager.read_file(file_path).await.map_err(to_mcp_error)?;
+
+    if let Some(expected) = expected_hash {
+        let actual = turbovault_vault::compute_hash(&content);
+        if actual != expected {
+            return Err(McpError::internal(
+                "File modified since last read (hash mismatch). Re-read with read_note and retry."
+                    .to_string(),
+            ));
+        }
+    }
+
+    let line_sep = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let raw_lines: Vec<String> = content.split(line_sep).map(|s| s.to_string()).collect();
+
+    let line_idx = position
+        .checked_sub(1)
+        .ok_or_else(|| McpError::internal("position must be >= 1".to_string()))?;
+
+    if line_idx >= raw_lines.len() {
+        return Err(McpError::internal(format!(
+            "position {} is beyond end of file ({} lines)",
+            position,
+            raw_lines.len()
+        )));
+    }
+
+    let trimmed = raw_lines[line_idx].trim();
+    if !trimmed.starts_with("- [ ]")
+        && !trimmed.starts_with("- [x]")
+        && !trimmed.starts_with("- [X]")
+    {
+        return Err(McpError::internal(format!(
+            "line {} is not a task checkbox: {:?}",
+            position, raw_lines[line_idx]
+        )));
+    }
+
+    let indent = {
+        let original = &raw_lines[line_idx];
+        let trimmed_len = original.trim_start().len();
+        original[..original.len() - trimmed_len].to_string()
+    };
+
+    let vault_file = manager.parse_file(file_path).await.map_err(to_mcp_error)?;
+    let task = vault_file
+        .tasks
+        .into_iter()
+        .find(|t| t.position.line == position)
+        .ok_or_else(|| McpError::internal(format!("no parsed task found at line {}", position)))?;
+
+    Ok((line_sep.to_string(), raw_lines, indent, task))
+}
+
+/// Compute next-occurrence dates for a recurring task using the Obsidian Tasks plugin convention.
+///
+/// Returns `(due_date, scheduled_date, start_date)` for the next instance, offset by the same
+/// interval as `due_date`. Returns `None` when the recurrence rule is not recognized.
+///
+/// Supported units: `day(s)`, `week(s)`, `month(s)`, `year(s)`, `weekday(s)`, `weekend(s)`.
+/// An optional leading count (e.g. `"every 2 weeks"`) is supported.
+fn compute_next_occurrence(
+    recurrence: &str,
+    due_date: Option<chrono::NaiveDate>,
+    scheduled_date: Option<chrono::NaiveDate>,
+    start_date: Option<chrono::NaiveDate>,
+    done_date: chrono::NaiveDate,
+) -> Option<(
+    Option<chrono::NaiveDate>,
+    Option<chrono::NaiveDate>,
+    Option<chrono::NaiveDate>,
+)> {
+    use chrono::Datelike;
+
+    let lower = recurrence.trim().to_lowercase();
+    let rest = lower.strip_prefix("every ").unwrap_or(&lower).trim();
+    // "!" prefix signals "when done" scheduling in Tasks plugin; treat identically for our purposes
+    let rest = rest.trim_start_matches('!').trim();
+
+    let (n, unit_str): (i64, &str) = match rest.find(' ') {
+        Some(pos) => match rest[..pos].parse::<i64>() {
+            Ok(n) => (n, rest[pos + 1..].trim()),
+            Err(_) => (1, rest),
+        },
+        None => (1, rest),
+    };
+
+    // Use due_date as the reference if set; otherwise fall back to done_date
+    let reference = due_date.unwrap_or(done_date);
+
+    let next_due: chrono::NaiveDate = match unit_str {
+        "day" | "days" => reference + chrono::Duration::days(n),
+        "week" | "weeks" => reference + chrono::Duration::days(n * 7),
+        "month" | "months" => advance_by_months(reference, n as u32)?,
+        "year" | "years" => advance_by_months(reference, (n * 12) as u32)?,
+        "weekday" | "weekdays" => {
+            let mut d = reference + chrono::Duration::days(1);
+            while matches!(d.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun) {
+                d += chrono::Duration::days(1);
+            }
+            d
+        }
+        "weekend" | "weekends" => {
+            let mut d = reference + chrono::Duration::days(1);
+            while !matches!(d.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun) {
+                d += chrono::Duration::days(1);
+            }
+            d
+        }
+        _ => return None,
+    };
+
+    let offset = next_due.signed_duration_since(reference);
+    let next_scheduled = scheduled_date.map(|d| d + offset);
+    let next_start = start_date.map(|d| d + offset);
+
+    Some((Some(next_due), next_scheduled, next_start))
+}
+
+/// Advance a date by `months` calendar months, clamping the day to the last valid day if needed.
+fn advance_by_months(date: chrono::NaiveDate, months: u32) -> Option<chrono::NaiveDate> {
+    use chrono::Datelike;
+    let total = date.month0() + months;
+    let new_year = date.year() + (total / 12) as i32;
+    let new_month = total % 12 + 1;
+    let last_day = days_in_month(new_year, new_month);
+    chrono::NaiveDate::from_ymd_opt(new_year, new_month, date.day().min(last_day))
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    let (ny, nm) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    chrono::NaiveDate::from_ymd_opt(ny, nm, 1)
+        .and_then(|d| d.pred_opt())
+        .map(|d| chrono::Datelike::day(&d))
+        .unwrap_or(28)
+}
+
 /// Extract count from serde_json::Value array (eliminates DRY violation)
 #[inline]
 fn extract_count(value: &serde_json::Value) -> usize {
@@ -2304,70 +2462,12 @@ impl ObsidianMcpServer {
         add_tags: Option<Vec<String>>,
         remove_tags: Option<Vec<String>>,
     ) -> McpResult<serde_json::Value> {
-        use turbovault_vault::compute_hash;
-
         let (vault_name, manager) = self.get_vault_pair().await?;
         let file_path = std::path::Path::new(&path);
 
-        // Read raw file content
-        let content = manager.read_file(file_path).await.map_err(to_mcp_error)?;
-
-        // Validate optimistic concurrency hash if provided
-        if let Some(ref expected) = expected_hash {
-            let actual = compute_hash(&content);
-            if actual != *expected {
-                return Err(McpError::internal(
-                    "File modified since last read (hash mismatch). Re-read with read_note and retry.".to_string(),
-                ));
-            }
-        }
-
-        // Detect line ending style and split
-        let line_sep = if content.contains("\r\n") {
-            "\r\n"
-        } else {
-            "\n"
-        };
-        let raw_lines: Vec<&str> = if line_sep == "\r\n" {
-            content.split("\r\n").collect()
-        } else {
-            content.split('\n').collect()
-        };
-
-        // Convert 1-indexed position to 0-indexed array access
-        let line_idx = position
-            .checked_sub(1)
-            .ok_or_else(|| McpError::internal("position must be >= 1".to_string()))?;
-
-        if line_idx >= raw_lines.len() {
-            return Err(McpError::internal(format!(
-                "position {} is beyond end of file ({} lines)",
-                position,
-                raw_lines.len()
-            )));
-        }
-
-        // Sanity-check that the target line looks like a task
-        let trimmed = raw_lines[line_idx].trim();
-        if !trimmed.starts_with("- [ ]")
-            && !trimmed.starts_with("- [x]")
-            && !trimmed.starts_with("- [X]")
-        {
-            return Err(McpError::internal(format!(
-                "line {} is not a task checkbox: {:?}",
-                position, raw_lines[line_idx]
-            )));
-        }
-
-        // Parse the full file to get a typed TaskItem at this position
-        let vault_file = manager.parse_file(file_path).await.map_err(to_mcp_error)?;
-        let mut task = vault_file
-            .tasks
-            .into_iter()
-            .find(|t| t.position.line == position)
-            .ok_or_else(|| {
-                McpError::internal(format!("no parsed task found at line {}", position))
-            })?;
+        let (line_sep, mut raw_lines, indent, mut task) =
+            read_task_for_update(&manager, file_path, position, expected_hash.as_deref()).await?;
+        let line_idx = position - 1;
 
         let mut warnings: Vec<String> = Vec::new();
 
@@ -2449,17 +2549,9 @@ impl ObsidianMcpServer {
             }
         }
 
-        // Serialize updated task to markdown and replace the line
-        let indent = {
-            let original = raw_lines[line_idx];
-            let trimmed_len = original.trim_start().len();
-            &original[..original.len() - trimmed_len]
-        };
         let new_line = format!("{}{}", indent, task.to_markdown_line());
-
-        let mut new_lines: Vec<String> = raw_lines.iter().map(|s| s.to_string()).collect();
-        new_lines[line_idx] = new_line.clone();
-        let new_content = new_lines.join(line_sep);
+        raw_lines[line_idx] = new_line.clone();
+        let new_content = raw_lines.join(&line_sep);
 
         // Write back — pass original expected_hash so write_file re-validates atomically
         manager
@@ -2491,6 +2583,194 @@ impl ObsidianMcpServer {
             response = response.with_warning(w);
         }
         response.with_next_step("list_tasks").to_json()
+    }
+
+    /// Mark a task as done and spawn the next recurrence if applicable
+    #[tool(
+        description = "Mark a task as completed, stamp today's done date, and spawn the next pending occurrence for recurring tasks",
+        usage = "Preferred shorthand over update_task when completing a task. Automatically stamps done_date with today. For recurring tasks, inserts a new pending occurrence immediately after the completed line (Tasks plugin convention) so the chain stays intact. Pass done_date to override today's date.",
+        performance = "Fast - reads and writes a single file",
+        related = ["list_tasks", "update_task", "get_overdue_tasks"],
+        examples = [
+            "path: 'daily/2026-05-01.md', position: 5",
+            "path: 'tasks.md', position: 3, done_date: '2026-05-01'"
+        ]
+    )]
+    async fn complete_task(
+        &self,
+        path: String,
+        position: usize,
+        expected_hash: Option<String>,
+        done_date: Option<String>,
+    ) -> McpResult<serde_json::Value> {
+        let (vault_name, manager) = self.get_vault_pair().await?;
+        let file_path = std::path::Path::new(&path);
+
+        let (line_sep, mut raw_lines, indent, mut task) =
+            read_task_for_update(&manager, file_path, position, expected_hash.as_deref()).await?;
+        let line_idx = position - 1;
+
+        let stamp = if let Some(ref s) = done_date {
+            if s.is_empty() {
+                chrono::Local::now().date_naive()
+            } else {
+                chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
+                    McpError::internal(format!("invalid done_date: {s:?} — use YYYY-MM-DD"))
+                })?
+            }
+        } else {
+            chrono::Local::now().date_naive()
+        };
+
+        task.is_completed = true;
+        task.done_date = Some(stamp);
+
+        let completed_line = format!("{}{}", indent, task.to_markdown_line());
+        raw_lines[line_idx] = completed_line.clone();
+
+        let mut spawned = false;
+        let mut next_occurrence_line: Option<String> = None;
+        let mut next_occurrence_position: Option<usize> = None;
+
+        if let Some(ref rec) = task.recurrence.clone()
+            && let Some((next_due, next_sched, next_start)) = compute_next_occurrence(
+                rec,
+                task.due_date,
+                task.scheduled_date,
+                task.start_date,
+                stamp,
+            )
+        {
+            let mut next_task = task.clone();
+            next_task.is_completed = false;
+            next_task.done_date = None;
+            next_task.cancelled_date = None;
+            next_task.due_date = next_due;
+            next_task.scheduled_date = next_sched;
+            next_task.start_date = next_start;
+
+            let next_line = format!("{}{}", indent, next_task.to_markdown_line());
+            raw_lines.insert(line_idx + 1, next_line.clone());
+            next_occurrence_line = Some(next_line);
+            next_occurrence_position = Some(position + 1);
+            spawned = true;
+        }
+
+        let new_content = raw_lines.join(&line_sep);
+        manager
+            .write_file(file_path, &new_content, expected_hash.as_deref())
+            .await
+            .map_err(to_mcp_error)?;
+
+        let mut data = serde_json::json!({
+            "path": path,
+            "position": position,
+            "completed_line": completed_line,
+            "done_date": stamp.to_string(),
+            "spawned_next_occurrence": spawned,
+            "task": {
+                "content": task.content,
+                "is_completed": task.is_completed,
+                "priority": task.priority,
+                "due_date": task.due_date.map(|d| d.to_string()),
+                "scheduled_date": task.scheduled_date.map(|d| d.to_string()),
+                "start_date": task.start_date.map(|d| d.to_string()),
+                "done_date": task.done_date.map(|d| d.to_string()),
+                "recurrence": task.recurrence,
+                "tags": task.tags,
+            },
+        });
+        if let Some(ref line) = next_occurrence_line {
+            data["next_occurrence_line"] = serde_json::Value::String(line.clone());
+        }
+        if let Some(pos) = next_occurrence_position {
+            data["next_occurrence_position"] = serde_json::json!(pos);
+        }
+
+        StandardResponse::new(vault_name, "complete_task", data)
+            .with_next_step("list_tasks")
+            .to_json()
+    }
+
+    /// List pending tasks whose due date is in the past
+    #[tool(
+        description = "List all pending tasks whose due date is before today (or a specified date), sorted oldest-first",
+        usage = "Use to surface tasks that need immediate attention. Returns only pending (not completed) tasks with a due_date set. Each result includes a days_overdue field. Optionally pass as_of_date (YYYY-MM-DD) to check overdue status relative to a specific date instead of today — useful for weekly reviews.",
+        performance = "Moderate - parses all markdown files in vault",
+        related = ["list_tasks", "complete_task", "update_task"],
+        examples = [
+            "No arguments — returns all tasks overdue as of today",
+            "as_of_date: '2026-05-07' — returns tasks overdue on that date"
+        ]
+    )]
+    async fn get_overdue_tasks(&self, as_of_date: Option<String>) -> McpResult<serde_json::Value> {
+        let (vault_name, manager) = self.get_vault_pair().await?;
+
+        let today = if let Some(ref s) = as_of_date {
+            chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
+                McpError::internal(format!("invalid as_of_date: {s:?} — use YYYY-MM-DD"))
+            })?
+        } else {
+            chrono::Local::now().date_naive()
+        };
+
+        let files = manager.scan_vault().await.map_err(to_mcp_error)?;
+        let mut overdue: Vec<serde_json::Value> = Vec::new();
+
+        for file_path in files {
+            if !file_path.to_string_lossy().ends_with(".md") {
+                continue;
+            }
+            let vault_file = match manager.parse_file(&file_path).await {
+                Ok(vf) => vf,
+                Err(_) => continue,
+            };
+            for task in vault_file.tasks {
+                if task.is_completed {
+                    continue;
+                }
+                if let Some(due) = task.due_date
+                    && due < today
+                {
+                    let days_overdue = (today - due).num_days();
+                    overdue.push(serde_json::json!({
+                        "content": task.content,
+                        "is_completed": false,
+                        "path": file_path.to_string_lossy(),
+                        "position": task.position,
+                        "priority": task.priority,
+                        "due_date": due.to_string(),
+                        "days_overdue": days_overdue,
+                        "scheduled_date": task.scheduled_date.map(|d| d.to_string()),
+                        "start_date": task.start_date.map(|d| d.to_string()),
+                        "recurrence": task.recurrence,
+                        "tags": task.tags,
+                    }));
+                }
+            }
+        }
+
+        // Oldest overdue first
+        overdue.sort_by(|a, b| {
+            a["due_date"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["due_date"].as_str().unwrap_or(""))
+        });
+
+        let count = overdue.len();
+        StandardResponse::new(
+            vault_name,
+            "get_overdue_tasks",
+            serde_json::json!({
+                "tasks": overdue,
+                "as_of": today.to_string(),
+            }),
+        )
+        .with_count(count)
+        .with_next_step("complete_task")
+        .with_next_step("update_task")
+        .to_json()
     }
 
     // ==================== Resources (OFM Knowledge Injection) ====================
