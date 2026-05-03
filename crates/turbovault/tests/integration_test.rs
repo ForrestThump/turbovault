@@ -324,6 +324,259 @@ mod tests {
         assert_eq!(t.id.as_deref(), Some("sprint-42"));
     }
 
+    // ==================== update_task Tests ====================
+
+    /// Helper: replace a specific 1-indexed line in file content and write it back.
+    /// Mirrors the logic in the update_task MCP tool.
+    async fn apply_task_update(
+        manager: &VaultManager,
+        file_path: &PathBuf,
+        task: &turbovault_core::TaskItem,
+    ) {
+        let content = manager.read_file(file_path).await.expect("read file");
+        let hash = turbovault_vault::compute_hash(&content);
+
+        let line_sep = if content.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        let mut lines: Vec<String> = if line_sep == "\r\n" {
+            content.split("\r\n").map(|s| s.to_string()).collect()
+        } else {
+            content.split('\n').map(|s| s.to_string()).collect()
+        };
+
+        let line_idx = task.position.line - 1; // 1-indexed → 0-indexed
+        let original = &lines[line_idx];
+        let indent_len = original.len() - original.trim_start().len();
+        let indent = original[..indent_len].to_string();
+        lines[line_idx] = format!("{}{}", indent, task.to_markdown_line());
+
+        let new_content = lines.join(line_sep);
+        manager
+            .write_file(file_path, &new_content, Some(&hash))
+            .await
+            .expect("write file");
+    }
+
+    #[tokio::test]
+    async fn test_update_task_mark_complete() {
+        use chrono::NaiveDate;
+        let (_temp, manager) = create_task_vault().await;
+        let file_path = PathBuf::from("TestFolder/Tasks.md");
+
+        // Find the task we want to update
+        let vault_file = manager.parse_file(&file_path).await.expect("parse");
+        let mut task = vault_file
+            .tasks
+            .iter()
+            .find(|t| t.content == "Take out the trash")
+            .expect("find task")
+            .clone();
+
+        assert!(!task.is_completed);
+        assert!(task.done_date.is_none());
+
+        // Mutate
+        task.is_completed = true;
+        task.done_date = NaiveDate::from_ymd_opt(2026, 5, 2);
+
+        apply_task_update(&manager, &file_path, &task).await;
+
+        // Re-parse and verify
+        let vault_file2 = manager.parse_file(&file_path).await.expect("re-parse");
+        let updated = vault_file2
+            .tasks
+            .iter()
+            .find(|t| t.content == "Take out the trash")
+            .expect("find updated task");
+
+        assert!(updated.is_completed);
+        assert_eq!(
+            updated.done_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-05-02")
+        );
+        // Dates from the original task should be preserved
+        assert_eq!(
+            updated.due_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-04-30")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_task_change_priority() {
+        let (_temp, manager) = create_task_vault().await;
+        let file_path = PathBuf::from("TestFolder/Tasks.md");
+
+        let vault_file = manager.parse_file(&file_path).await.expect("parse");
+        let mut task = vault_file
+            .tasks
+            .iter()
+            .find(|t| t.content == "Feed the cat")
+            .expect("find task")
+            .clone();
+
+        assert_eq!(task.priority, TaskPriority::High);
+
+        task.priority = TaskPriority::Lowest;
+        apply_task_update(&manager, &file_path, &task).await;
+
+        let vault_file2 = manager.parse_file(&file_path).await.expect("re-parse");
+        let updated = vault_file2
+            .tasks
+            .iter()
+            .find(|t| t.content == "Feed the cat")
+            .expect("find updated task");
+
+        assert_eq!(updated.priority, TaskPriority::Lowest);
+        // Other fields should be unchanged
+        assert_eq!(updated.recurrence.as_deref(), Some("every day"));
+        assert!(!updated.is_completed);
+    }
+
+    #[tokio::test]
+    async fn test_update_task_add_and_remove_tags() {
+        let (_temp, manager) = create_task_vault().await;
+        let file_path = PathBuf::from("TestFolder/Tasks.md");
+
+        let vault_file = manager.parse_file(&file_path).await.expect("parse");
+        let mut task = vault_file
+            .tasks
+            .iter()
+            .find(|t| t.content == "Clean the kitchen #task_type_1")
+            .expect("find task")
+            .clone();
+
+        assert!(task.tags.iter().any(|t| t == "task_type_1"));
+
+        // Add a new tag and remove the existing one
+        let bare = "urgent";
+        task.content.push(' ');
+        task.content.push('#');
+        task.content.push_str(bare);
+        task.tags.push(bare.to_string());
+
+        // Remove task_type_1
+        let remove = "task_type_1";
+        let pattern = format!("#{}", remove);
+        let lower = task.content.to_lowercase();
+        if let Some(pos) = lower.find(&pattern) {
+            let end = pos + pattern.len();
+            let start = if pos > 0 && task.content.as_bytes().get(pos - 1) == Some(&b' ') {
+                pos - 1
+            } else {
+                pos
+            };
+            task.content.drain(start..end);
+            task.content = task.content.trim_end().to_string();
+            task.tags.retain(|t| t != remove);
+        }
+
+        apply_task_update(&manager, &file_path, &task).await;
+
+        let vault_file2 = manager.parse_file(&file_path).await.expect("re-parse");
+        let updated = vault_file2
+            .tasks
+            .iter()
+            .find(|t| t.tags.iter().any(|tag| tag == "urgent"))
+            .expect("find updated task");
+
+        assert!(updated.tags.iter().any(|t| t == "urgent"));
+        assert!(!updated.tags.iter().any(|t| t == "task_type_1"));
+    }
+
+    #[tokio::test]
+    async fn test_update_task_dataview_format_preserved() {
+        use chrono::NaiveDate;
+        use turbovault_core::TaskMetadataFormat;
+
+        let (_temp, manager) = create_task_vault().await;
+        let file_path = PathBuf::from("TestFolder/Tasks.md");
+
+        let vault_file = manager.parse_file(&file_path).await.expect("parse");
+        let mut task = vault_file
+            .tasks
+            .iter()
+            .find(|t| t.content == "Buy groceries #errands")
+            .expect("find task")
+            .clone();
+
+        // Confirm parser detected dataview format
+        assert_eq!(task.metadata_format, TaskMetadataFormat::Dataview);
+
+        // Update the due date
+        task.due_date = NaiveDate::from_ymd_opt(2026, 6, 1);
+
+        apply_task_update(&manager, &file_path, &task).await;
+
+        // Read raw content to confirm dataview notation was used
+        let new_content = manager.read_file(&file_path).await.expect("read");
+        assert!(
+            new_content.contains("[due:: 2026-06-01]"),
+            "expected dataview [due:: ...] notation in: {new_content}"
+        );
+        assert!(
+            !new_content.contains("📅 2026-06-01"),
+            "unexpected emoji notation in dataview task"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_task_clear_due_date() {
+        let (_temp, manager) = create_task_vault().await;
+        let file_path = PathBuf::from("TestFolder/Tasks.md");
+
+        let vault_file = manager.parse_file(&file_path).await.expect("parse");
+        let mut task = vault_file
+            .tasks
+            .iter()
+            .find(|t| t.content == "Take out the trash")
+            .expect("find task")
+            .clone();
+
+        assert!(task.due_date.is_some());
+
+        task.due_date = None;
+        apply_task_update(&manager, &file_path, &task).await;
+
+        let vault_file2 = manager.parse_file(&file_path).await.expect("re-parse");
+        let updated = vault_file2
+            .tasks
+            .iter()
+            .find(|t| t.content == "Take out the trash")
+            .expect("find updated task");
+
+        assert!(
+            updated.due_date.is_none(),
+            "due_date should have been cleared"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_task_hash_guard_rejects_stale_write() {
+        let (_temp, manager) = create_task_vault().await;
+        let file_path = PathBuf::from("TestFolder/Tasks.md");
+
+        // Read the file and capture hash
+        let content = manager.read_file(&file_path).await.expect("read");
+        let stale_hash = turbovault_vault::compute_hash(&content);
+
+        // Modify the file so the hash becomes stale
+        let modified = format!("{}\n<!-- touched -->", content);
+        manager
+            .write_file(&file_path, &modified, None)
+            .await
+            .expect("first write");
+
+        // Attempt to write with the now-stale hash — should fail
+        let result = manager
+            .write_file(&file_path, &modified, Some(&stale_hash))
+            .await;
+
+        assert!(result.is_err(), "write with stale hash should fail");
+    }
+
     #[tokio::test]
     async fn test_list_tasks_mcp_tool() {
         let (_temp, manager) = create_task_vault().await;

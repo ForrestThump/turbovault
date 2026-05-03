@@ -37,6 +37,41 @@ fn to_mcp_error(e: Error) -> McpError {
     McpError::internal(e.to_string())
 }
 
+/// Parse a human-readable priority string to `TaskPriority`.
+fn parse_task_priority(s: &str) -> Option<turbovault_core::TaskPriority> {
+    use turbovault_core::TaskPriority;
+    match s.to_lowercase().as_str() {
+        "lowest" => Some(TaskPriority::Lowest),
+        "low" => Some(TaskPriority::Low),
+        "normal" | "none" | "" => Some(TaskPriority::Normal),
+        "medium" => Some(TaskPriority::Medium),
+        "high" => Some(TaskPriority::High),
+        "highest" => Some(TaskPriority::Highest),
+        _ => None,
+    }
+}
+
+/// Apply an optional date string update to a `NaiveDate` field.
+/// `None` → leave unchanged; `Some("")` → clear; `Some("YYYY-MM-DD")` → set.
+fn apply_date_field(
+    field: &mut Option<chrono::NaiveDate>,
+    update: Option<&str>,
+    name: &str,
+) -> McpResult<()> {
+    if let Some(s) = update {
+        if s.is_empty() || s.eq_ignore_ascii_case("clear") || s.eq_ignore_ascii_case("none") {
+            *field = None;
+        } else {
+            *field = Some(
+                chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
+                    McpError::internal(format!("invalid date for {name}: {s:?} — use YYYY-MM-DD"))
+                })?,
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Extract count from serde_json::Value array (eliminates DRY violation)
 #[inline]
 fn extract_count(value: &serde_json::Value) -> usize {
@@ -2239,6 +2274,225 @@ impl ObsidianMcpServer {
 
         response.to_json()
     }
+    /// Update fields of a specific task in the vault
+    #[tool(
+        description = "Update one or more fields of a task identified by its file path and line position",
+        usage = "Use to modify a task in-place. Identify the task using path and position from list_tasks. Only fields you provide are changed — omitted fields are left as-is. Pass expected_hash (from read_note) for concurrency safety. To clear a date or recurrence, pass an empty string \"\". Completing a task (is_completed: true) auto-stamps done_date with today; marking incomplete clears it.",
+        performance = "Fast - reads and writes a single file",
+        related = ["list_tasks", "read_note"],
+        examples = [
+            "is_completed: true",
+            "priority: 'high'",
+            "due_date: '2026-05-10'",
+            "due_date: '' (clears the date)",
+            "add_tags: ['urgent'], remove_tags: ['someday']",
+            "recurrence: 'every week'"
+        ]
+    )]
+    #[allow(clippy::too_many_arguments)]
+    async fn update_task(
+        &self,
+        path: String,
+        position: usize,
+        expected_hash: Option<String>,
+        is_completed: Option<bool>,
+        priority: Option<String>,
+        due_date: Option<String>,
+        scheduled_date: Option<String>,
+        start_date: Option<String>,
+        recurrence: Option<String>,
+        add_tags: Option<Vec<String>>,
+        remove_tags: Option<Vec<String>>,
+    ) -> McpResult<serde_json::Value> {
+        use turbovault_vault::compute_hash;
+
+        let (vault_name, manager) = self.get_vault_pair().await?;
+        let file_path = std::path::Path::new(&path);
+
+        // Read raw file content
+        let content = manager.read_file(file_path).await.map_err(to_mcp_error)?;
+
+        // Validate optimistic concurrency hash if provided
+        if let Some(ref expected) = expected_hash {
+            let actual = compute_hash(&content);
+            if actual != *expected {
+                return Err(McpError::internal(
+                    "File modified since last read (hash mismatch). Re-read with read_note and retry.".to_string(),
+                ));
+            }
+        }
+
+        // Detect line ending style and split
+        let line_sep = if content.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        let raw_lines: Vec<&str> = if line_sep == "\r\n" {
+            content.split("\r\n").collect()
+        } else {
+            content.split('\n').collect()
+        };
+
+        // Convert 1-indexed position to 0-indexed array access
+        let line_idx = position
+            .checked_sub(1)
+            .ok_or_else(|| McpError::internal("position must be >= 1".to_string()))?;
+
+        if line_idx >= raw_lines.len() {
+            return Err(McpError::internal(format!(
+                "position {} is beyond end of file ({} lines)",
+                position,
+                raw_lines.len()
+            )));
+        }
+
+        // Sanity-check that the target line looks like a task
+        let trimmed = raw_lines[line_idx].trim();
+        if !trimmed.starts_with("- [ ]")
+            && !trimmed.starts_with("- [x]")
+            && !trimmed.starts_with("- [X]")
+        {
+            return Err(McpError::internal(format!(
+                "line {} is not a task checkbox: {:?}",
+                position, raw_lines[line_idx]
+            )));
+        }
+
+        // Parse the full file to get a typed TaskItem at this position
+        let vault_file = manager.parse_file(file_path).await.map_err(to_mcp_error)?;
+        let mut task = vault_file
+            .tasks
+            .into_iter()
+            .find(|t| t.position.line == position)
+            .ok_or_else(|| {
+                McpError::internal(format!("no parsed task found at line {}", position))
+            })?;
+
+        let mut warnings: Vec<String> = Vec::new();
+
+        // --- Apply mutations ---
+
+        if let Some(completed) = is_completed {
+            task.is_completed = completed;
+            if completed && task.done_date.is_none() {
+                task.done_date = Some(chrono::Local::now().date_naive());
+            } else if !completed {
+                task.done_date = None;
+            }
+        }
+
+        if let Some(ref p) = priority {
+            task.priority = parse_task_priority(p).ok_or_else(|| {
+                McpError::internal(format!(
+                    "unknown priority {:?} — use: lowest, low, normal, medium, high, highest",
+                    p
+                ))
+            })?;
+        }
+
+        apply_date_field(&mut task.due_date, due_date.as_deref(), "due_date")?;
+        apply_date_field(
+            &mut task.scheduled_date,
+            scheduled_date.as_deref(),
+            "scheduled_date",
+        )?;
+        apply_date_field(&mut task.start_date, start_date.as_deref(), "start_date")?;
+
+        if let Some(ref rec) = recurrence {
+            task.recurrence = if rec.is_empty() {
+                None
+            } else {
+                Some(rec.clone())
+            };
+        }
+
+        if let Some(tags) = add_tags {
+            for tag in tags {
+                let bare = tag.trim_start_matches('#').to_string();
+                if !task.tags.iter().any(|t| t.eq_ignore_ascii_case(&bare)) {
+                    task.content.push(' ');
+                    task.content.push('#');
+                    task.content.push_str(&bare);
+                    task.tags.push(bare);
+                }
+            }
+        }
+
+        if let Some(tags) = remove_tags {
+            for tag in tags {
+                let bare = tag.trim_start_matches('#').to_lowercase();
+                let pattern = format!("#{}", bare);
+                let lower = task.content.to_lowercase();
+                if let Some(pos) = lower.find(&pattern) {
+                    let end = pos + pattern.len();
+                    // Check word boundary — don't remove #work from #work-hard
+                    let is_boundary = lower[end..]
+                        .chars()
+                        .next()
+                        .map(|c| !c.is_alphanumeric() && c != '-' && c != '_')
+                        .unwrap_or(true);
+                    if is_boundary {
+                        let start =
+                            if pos > 0 && task.content.as_bytes().get(pos - 1) == Some(&b' ') {
+                                pos - 1
+                            } else {
+                                pos
+                            };
+                        task.content.drain(start..end);
+                        task.content = task.content.trim_end().to_string();
+                        task.tags.retain(|t| !t.eq_ignore_ascii_case(&bare));
+                        continue;
+                    }
+                }
+                warnings.push(format!("tag {:?} not found on task", tag));
+            }
+        }
+
+        // Serialize updated task to markdown and replace the line
+        let indent = {
+            let original = raw_lines[line_idx];
+            let trimmed_len = original.trim_start().len();
+            &original[..original.len() - trimmed_len]
+        };
+        let new_line = format!("{}{}", indent, task.to_markdown_line());
+
+        let mut new_lines: Vec<String> = raw_lines.iter().map(|s| s.to_string()).collect();
+        new_lines[line_idx] = new_line.clone();
+        let new_content = new_lines.join(line_sep);
+
+        // Write back — pass original expected_hash so write_file re-validates atomically
+        manager
+            .write_file(file_path, &new_content, expected_hash.as_deref())
+            .await
+            .map_err(to_mcp_error)?;
+
+        let mut response = StandardResponse::new(
+            vault_name,
+            "update_task",
+            serde_json::json!({
+                "path": path,
+                "position": position,
+                "new_line": new_line,
+                "task": {
+                    "content": task.content,
+                    "is_completed": task.is_completed,
+                    "priority": task.priority,
+                    "due_date": task.due_date.map(|d| d.to_string()),
+                    "scheduled_date": task.scheduled_date.map(|d| d.to_string()),
+                    "start_date": task.start_date.map(|d| d.to_string()),
+                    "done_date": task.done_date.map(|d| d.to_string()),
+                    "recurrence": task.recurrence,
+                    "tags": task.tags,
+                },
+            }),
+        );
+        for w in warnings {
+            response = response.with_warning(w);
+        }
+        response.with_next_step("list_tasks").to_json()
+    }
+
     // ==================== Resources (OFM Knowledge Injection) ====================
 
     /// Complete Obsidian Flavored Markdown syntax guide
