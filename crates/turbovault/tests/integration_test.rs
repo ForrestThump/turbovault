@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
     use tokio::fs;
     use turbovault::ObsidianMcpServer;
@@ -330,7 +330,7 @@ mod tests {
     /// Mirrors the logic in the update_task MCP tool.
     async fn apply_task_update(
         manager: &VaultManager,
-        file_path: &PathBuf,
+        file_path: &Path,
         task: &turbovault_core::TaskItem,
     ) {
         let content = manager.read_file(file_path).await.expect("read file");
@@ -583,7 +583,7 @@ mod tests {
     /// Returns the next-occurrence line if recurrence was detected and handled.
     async fn apply_task_complete(
         manager: &VaultManager,
-        file_path: &PathBuf,
+        file_path: &Path,
         task_content: &str,
         done: chrono::NaiveDate,
     ) -> Option<String> {
@@ -773,10 +773,10 @@ mod tests {
                 if task.is_completed {
                     continue;
                 }
-                if let Some(due) = task.due_date {
-                    if due < as_of {
-                        overdue.push((task.content, due));
-                    }
+                if let Some(due) = task.due_date
+                    && due < as_of
+                {
+                    overdue.push((task.content, due));
                 }
             }
         }
@@ -805,41 +805,61 @@ mod tests {
             "expected 5 overdue tasks as of {as_of}, got: {contents:?}"
         );
         assert!(
-            contents.iter().any(|c| *c == "Take out the trash"),
+            contents.contains(&"Take out the trash"),
             "missing 'Take out the trash'"
         );
+        assert!(contents.contains(&"Feed the cat"), "missing 'Feed the cat'");
         assert!(
-            contents.iter().any(|c| *c == "Feed the cat"),
-            "missing 'Feed the cat'"
-        );
-        assert!(
-            contents
-                .iter()
-                .any(|c| *c == "Clean the kitchen #task_type_1"),
+            contents.contains(&"Clean the kitchen #task_type_1"),
             "missing 'Clean the kitchen #task_type_1'"
         );
         assert!(
-            contents
-                .iter()
-                .any(|c| *c == "Clean the baseboards #task_type_2"),
+            contents.contains(&"Clean the baseboards #task_type_2"),
             "missing 'Clean the baseboards #task_type_2'"
         );
         assert!(
-            contents.iter().any(|c| *c == "Buy groceries #errands"),
+            contents.contains(&"Buy groceries #errands"),
             "missing 'Buy groceries #errands'"
         );
 
         // Completed or future-due tasks must NOT appear
         assert!(
-            !contents.iter().any(|c| *c == "Submit expense report"),
+            !contents.contains(&"Submit expense report"),
             "completed task should not be overdue"
         );
         assert!(
-            !contents.iter().any(|c| *c == "Write weekly report"),
+            !contents.contains(&"Write weekly report"),
             "future task (due 2026-05-10) should not be overdue as of {as_of}"
         );
         assert!(
-            !contents.iter().any(|c| *c == "Plan sprint"),
+            !contents.contains(&"Plan sprint"),
+            "future task (due 2026-05-07) should not be overdue as of {as_of}"
+        );
+        assert!(contents.contains(&"Feed the cat"), "missing 'Feed the cat'");
+        assert!(
+            contents.contains(&"Clean the kitchen #task_type_1"),
+            "missing 'Clean the kitchen #task_type_1'"
+        );
+        assert!(
+            contents.contains(&"Clean the baseboards #task_type_2"),
+            "missing 'Clean the baseboards #task_type_2'"
+        );
+        assert!(
+            contents.contains(&"Buy groceries #errands"),
+            "missing 'Buy groceries #errands'"
+        );
+
+        // Completed or future-due tasks must NOT appear
+        assert!(
+            !contents.contains(&"Submit expense report"),
+            "completed task should not be overdue"
+        );
+        assert!(
+            !contents.contains(&"Write weekly report"),
+            "future task (due 2026-05-10) should not be overdue as of {as_of}"
+        );
+        assert!(
+            !contents.contains(&"Plan sprint"),
             "future task (due 2026-05-07) should not be overdue as of {as_of}"
         );
     }
@@ -906,7 +926,7 @@ mod tests {
             all_tasks
                 .iter()
                 .find(|t| t["content"] == content)
-                .expect(&format!("task not found: {content}"))
+                .unwrap_or_else(|| panic!("task not found: {content}"))
         };
 
         let pending_task = find_task("Take out the trash");
