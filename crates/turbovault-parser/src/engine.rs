@@ -931,6 +931,39 @@ mod tests {
     }
 
     #[test]
+    fn test_engine_task_ignores_nested_plain_list_item_text() {
+        let content = "- [x] Feed the cat ✅ 2026-02-15\n  - Leave a note under the task #pet-care";
+        let engine = ParseEngine::new(content);
+        let result = engine.parse(&ParseOptions::all());
+
+        assert_eq!(result.tasks.len(), 1);
+        assert_eq!(result.tasks[0].content, "Feed the cat");
+        assert_eq!(
+            result.tasks[0].done_date.map(|d| d.to_string()).as_deref(),
+            Some("2026-02-15")
+        );
+        assert_eq!(result.tasks[0].tags, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_engine_nested_tasks_are_separate_task_items() {
+        let content = "- [ ] Parent task\n  - [x] Child task ✅ 2026-02-15";
+        let engine = ParseEngine::new(content);
+        let result = engine.parse(&ParseOptions::all());
+
+        assert_eq!(result.tasks.len(), 2);
+        assert_eq!(result.tasks[0].content, "Parent task");
+        assert!(!result.tasks[0].is_completed);
+        assert_eq!(result.tasks[0].position.line, 1);
+        assert_eq!(result.tasks[0].position.column, 3);
+
+        assert_eq!(result.tasks[1].content, "Child task");
+        assert!(result.tasks[1].is_completed);
+        assert_eq!(result.tasks[1].position.line, 2);
+        assert_eq!(result.tasks[1].position.column, 5);
+    }
+
+    #[test]
     fn test_engine_frontmatter() {
         let content = "---\ntitle: Test\nauthor: Alice\n---\n\n# Content";
         let engine = ParseEngine::new(content);
