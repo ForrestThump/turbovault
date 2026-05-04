@@ -202,6 +202,7 @@ impl<'a> ParseEngine<'a> {
         // - Extract frontmatter, headings, markdown links, tasks
         // - Build excluded ranges (code blocks, inline code)
         let (excluded, body_start) = self.pulldown_pass(options, &mut result);
+        result.tasks.sort_by_key(|task| task.position.offset);
 
         // Store the body start offset (which is the end of frontmatter)
         result.frontmatter_end_offset = body_start;
@@ -267,8 +268,8 @@ impl<'a> ParseEngine<'a> {
         let mut heading_text = String::new();
         let mut heading_start: usize = 0;
 
-        let mut in_task_item: bool = false;
-        let mut task_builder: TaskBuilder = TaskBuilder::default();
+        let mut item_depth: usize = 0;
+        let mut task_stack: Vec<(usize, TaskBuilder)> = Vec::new();
 
         let mut current_link: Option<(String, String)> = None; // (url, title)
         let mut link_text = String::new();
@@ -362,34 +363,54 @@ impl<'a> ParseEngine<'a> {
                 }
 
                 // === Tasks ===
-                Event::TaskListMarker(_checked) if options.parse_tasks => {
-                    in_task_item = true;
-                    // Read raw marker byte to detect extended states [/] [-]
-                    task_builder.is_completed = {
-                        let raw_marker = self
-                            .content
-                            .as_bytes()
-                            .get(range.start + 1)
-                            .copied()
-                            .unwrap_or(b' ') as char;
-                        crate::models::TaskStatus::from_marker(raw_marker).is_completed()
-                    };
-                    task_builder.position = SourcePosition::from_offset_indexed(
-                        &self.index,
-                        range.start,
-                        range.end - range.start,
-                    );
+                Event::Start(Tag::Item) if options.parse_tasks => {
+                    item_depth += 1;
                 }
 
-                Event::End(TagEnd::Item) if in_task_item => {
-                    in_task_item = false;
-                    if !task_builder.content.is_empty() {
+                Event::TaskListMarker(_checked) if options.parse_tasks => {
+                    // Read raw marker byte to detect extended states [/] [-]
+                    let raw_marker = self
+                        .content
+                        .as_bytes()
+                        .get(range.start + 1)
+                        .copied()
+                        .unwrap_or(b' ') as char;
+                    let task_builder = TaskBuilder {
+                        is_completed: crate::models::TaskStatus::from_marker(raw_marker)
+                            .is_completed(),
+                        position: SourcePosition::from_offset_indexed(
+                            &self.index,
+                            range.start,
+                            range.end - range.start,
+                        ),
+                        ..TaskBuilder::default()
+                    };
+                    task_stack.push((item_depth, task_builder));
+                }
+
+                Event::End(TagEnd::Item) if options.parse_tasks => {
+                    let should_finish_task = task_stack
+                        .last()
+                        .map(|(depth, _)| *depth == item_depth)
+                        .unwrap_or(false);
+                    if should_finish_task
+                        && let Some((_, mut task_builder)) = task_stack.pop()
+                        && !task_builder.content.is_empty()
+                    {
                         result.tasks.push(task_builder.build());
                     }
+                    item_depth = item_depth.saturating_sub(1);
                 }
 
-                Event::Text(text) if in_task_item => {
-                    task_builder.content.push_str(&text);
+                Event::Text(text)
+                    if task_stack
+                        .last()
+                        .map(|(depth, _)| *depth == item_depth)
+                        .unwrap_or(false) =>
+                {
+                    if let Some((_, task_builder)) = task_stack.last_mut() {
+                        task_builder.content.push_str(&text);
+                    }
                 }
 
                 // === Markdown Links ===
