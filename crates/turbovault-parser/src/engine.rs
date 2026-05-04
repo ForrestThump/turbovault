@@ -985,6 +985,179 @@ mod tests {
     }
 
     #[test]
+    fn test_engine_deeply_nested_tasks_are_separate_task_items() {
+        let content =
+            "- [ ] Top level task\n  - [ ] Nested task\n    - [x] Deep task ✅ 2026-02-15";
+        let engine = ParseEngine::new(content);
+        let result = engine.parse(&ParseOptions::all());
+
+        assert_eq!(result.tasks.len(), 3);
+        assert_eq!(result.tasks[0].content, "Top level task");
+        assert_eq!(result.tasks[0].position.line, 1);
+        assert_eq!(result.tasks[0].position.column, 3);
+
+        assert_eq!(result.tasks[1].content, "Nested task");
+        assert_eq!(result.tasks[1].position.line, 2);
+        assert_eq!(result.tasks[1].position.column, 5);
+
+        assert_eq!(result.tasks[2].content, "Deep task");
+        assert!(result.tasks[2].is_completed);
+        assert_eq!(result.tasks[2].position.line, 3);
+        assert_eq!(result.tasks[2].position.column, 7);
+    }
+
+    #[test]
+    fn test_engine_mixed_plain_and_task_items_stay_isolated() {
+        let content = "- [ ] Take out the trash\n  - Put a note under the task #home\n  - [ ] Replace the trash bag";
+        let engine = ParseEngine::new(content);
+        let result = engine.parse(&ParseOptions::all());
+
+        assert_eq!(result.tasks.len(), 2);
+        assert_eq!(result.tasks[0].content, "Take out the trash");
+        assert_eq!(result.tasks[0].tags, Vec::<String>::new());
+        assert_eq!(result.tasks[1].content, "Replace the trash bag");
+        assert_eq!(result.tasks[1].position.line, 3);
+    }
+
+    #[test]
+    fn test_engine_resumed_nested_task_groups_keep_document_order() {
+        let content = "- [ ] Task A\n  - [ ] Task B\n- [ ] Task C\n  - [x] Task D ✅ 2026-02-15";
+        let engine = ParseEngine::new(content);
+        let result = engine.parse(&ParseOptions::all());
+
+        let contents: Vec<&str> = result
+            .tasks
+            .iter()
+            .map(|task| task.content.as_str())
+            .collect();
+
+        assert_eq!(contents, vec!["Task A", "Task B", "Task C", "Task D"]);
+        assert_eq!(result.tasks[0].position.line, 1);
+        assert_eq!(result.tasks[1].position.line, 2);
+        assert_eq!(result.tasks[2].position.line, 3);
+        assert_eq!(result.tasks[3].position.line, 4);
+        assert!(result.tasks[3].is_completed);
+    }
+
+    #[test]
+    fn test_engine_deeply_mixed_plain_and_task_items() {
+        let content = "- [ ] Task 1\n  - Plain note\n    - [ ] Task 2\n  - [x] Task 3 ✅ 2026-02-15\n- [ ] Task 4";
+        let engine = ParseEngine::new(content);
+        let result = engine.parse(&ParseOptions::all());
+
+        let contents: Vec<&str> = result
+            .tasks
+            .iter()
+            .map(|task| task.content.as_str())
+            .collect();
+
+        assert_eq!(contents, vec!["Task 1", "Task 2", "Task 3", "Task 4"]);
+        assert_eq!(result.tasks[0].position.line, 1);
+        assert_eq!(result.tasks[1].position.line, 3);
+        assert_eq!(result.tasks[2].position.line, 4);
+        assert_eq!(result.tasks[3].position.line, 5);
+        assert!(result.tasks[2].is_completed);
+    }
+
+    #[test]
+    fn test_engine_multiple_sibling_subtasks_stay_separate() {
+        let content = "- [ ] Clean kitchen\n  - [ ] Wash dishes\n  - [ ] Wipe counters\n  - [x] Take out recycling ✅ 2026-02-15";
+        let engine = ParseEngine::new(content);
+        let result = engine.parse(&ParseOptions::all());
+
+        let contents: Vec<&str> = result
+            .tasks
+            .iter()
+            .map(|task| task.content.as_str())
+            .collect();
+
+        assert_eq!(
+            contents,
+            vec![
+                "Clean kitchen",
+                "Wash dishes",
+                "Wipe counters",
+                "Take out recycling"
+            ]
+        );
+        assert_eq!(result.tasks[1].position.column, 5);
+        assert_eq!(result.tasks[2].position.column, 5);
+        assert_eq!(result.tasks[3].position.column, 5);
+        assert!(result.tasks[3].is_completed);
+    }
+
+    #[test]
+    fn test_engine_nested_plain_notes_do_not_contaminate_surrounding_tasks() {
+        let content = "- [ ] Plan dinner\n  - Check pantry #home\n    - Add missing ingredients to grocery list #errand\n  - [ ] Buy groceries\n- [ ] Cook dinner";
+        let engine = ParseEngine::new(content);
+        let result = engine.parse(&ParseOptions::all());
+
+        let contents: Vec<&str> = result
+            .tasks
+            .iter()
+            .map(|task| task.content.as_str())
+            .collect();
+
+        assert_eq!(
+            contents,
+            vec!["Plan dinner", "Buy groceries", "Cook dinner"]
+        );
+        assert!(result.tasks.iter().all(|task| task.tags.is_empty()));
+        assert_eq!(result.tasks[1].position.line, 4);
+        assert_eq!(result.tasks[2].position.line, 5);
+    }
+
+    #[test]
+    fn test_engine_task_under_plain_list_item_is_still_task() {
+        let content =
+            "- Project notes\n  - [ ] Capture follow-up\n    - [x] Confirm deadline ✅ 2026-02-15";
+        let engine = ParseEngine::new(content);
+        let result = engine.parse(&ParseOptions::all());
+
+        let contents: Vec<&str> = result
+            .tasks
+            .iter()
+            .map(|task| task.content.as_str())
+            .collect();
+
+        assert_eq!(contents, vec!["Capture follow-up", "Confirm deadline"]);
+        assert_eq!(result.tasks[0].position.line, 2);
+        assert_eq!(result.tasks[0].position.column, 5);
+        assert_eq!(result.tasks[1].position.line, 3);
+        assert_eq!(result.tasks[1].position.column, 7);
+        assert!(result.tasks[1].is_completed);
+    }
+
+    #[test]
+    fn test_engine_deep_task_then_returns_to_top_level() {
+        let content = "- [ ] Start project\n  - [ ] Draft outline\n    - [ ] Write intro\n      - [x] Add examples ✅ 2026-02-15\n- [ ] Send project update";
+        let engine = ParseEngine::new(content);
+        let result = engine.parse(&ParseOptions::all());
+
+        let contents: Vec<&str> = result
+            .tasks
+            .iter()
+            .map(|task| task.content.as_str())
+            .collect();
+
+        assert_eq!(
+            contents,
+            vec![
+                "Start project",
+                "Draft outline",
+                "Write intro",
+                "Add examples",
+                "Send project update"
+            ]
+        );
+        assert_eq!(result.tasks[0].position.column, 3);
+        assert_eq!(result.tasks[1].position.column, 5);
+        assert_eq!(result.tasks[2].position.column, 7);
+        assert_eq!(result.tasks[3].position.column, 9);
+        assert_eq!(result.tasks[4].position.column, 3);
+    }
+
+    #[test]
     fn test_engine_frontmatter() {
         let content = "---\ntitle: Test\nauthor: Alice\n---\n\n# Content";
         let engine = ParseEngine::new(content);
