@@ -39,6 +39,9 @@ unix = ["turbomcp/unix"]                     # Add Unix socket support (~100 KB)
 # SQL frontmatter queries (GlueSQL)
 sql = ["turbovault-tools/sql"]
 
+# Dense-vector semantic search (fastembed + usearch + SQLite; adds ~100MB first build)
+vector-search = ["turbovault-tools/vector-search", "dep:turbovault-vector"]
+
 # Convenience bundles
 http-full = ["http", "websocket"]            # HTTP + WebSocket
 # Note: unix is excluded from all-transports on Windows (not supported)
@@ -55,6 +58,7 @@ turbovault-core = { workspace = true }
 turbovault-vault = { workspace = true }
 turbovault-audit = { workspace = true }
 turbovault-tools = { workspace = true }
+turbovault-vector = { workspace = true, optional = true }
 
 # MCP server framework (features passed through from turbovault)
 turbomcp = { workspace = true, features = ["stdio", "telemetry"] }
@@ -84,6 +88,11 @@ criterion = { workspace = true, features = ["async_tokio", "html_reports"] }
 [[bench]]
 name = "tool_benchmarks"
 harness = false
+
+[[bench]]
+name = "vector_benchmarks"
+harness = false
+required-features = ["vector-search"]
 
 [package.metadata.docs.rs]
 all-features = true

@@ -1,0 +1,246 @@
+use crate::{EmbeddingEngine, VectorError, VectorIndex, chunks::ChunkStore};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::instrument;
+
+/// A single vector search result.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VectorResult {
+    pub note_path: String,
+    pub chunk_preview: String,
+    pub chunk_position: String,
+    pub score: f32,
+}
+
+/// A hybrid BM25 + vector search result.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HybridResult {
+    pub note_path: String,
+    pub chunk_preview: String,
+    pub chunk_position: String,
+    pub rrf_score: f64,
+    pub bm25_rank: Option<usize>,
+    pub vector_rank: Option<usize>,
+}
+
+/// Combines BM25 (Tantivy) and HNSW results via Reciprocal Rank Fusion.
+pub struct SearchRouter {
+    vector: Arc<RwLock<VectorIndex>>,
+    embedder: Arc<dyn EmbeddingEngine>,
+    chunks: Arc<ChunkStore>,
+    rrf_k: f64,
+    bm25_weight: f32,
+}
+
+impl SearchRouter {
+    pub fn new(
+        vector: Arc<RwLock<VectorIndex>>,
+        embedder: Arc<dyn EmbeddingEngine>,
+        chunks: Arc<ChunkStore>,
+        rrf_k: f64,
+        bm25_weight: f32,
+    ) -> Self {
+        Self {
+            vector,
+            embedder,
+            chunks,
+            rrf_k,
+            bm25_weight,
+        }
+    }
+
+    #[instrument(skip(self), fields(query_len = query.len()))]
+    pub async fn vector_only(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<VectorResult>, VectorError> {
+        // Embed the query
+        let mut embeddings = self.embedder.embed(&[query]).await?;
+        let query_vec = embeddings.remove(0);
+
+        // Search the HNSW index (over-fetch to allow dedup by note)
+        let index = self.vector.read().await;
+        let raw = index.search(&query_vec, limit * 3)?;
+        drop(index);
+
+        // Deduplicate by note_path, keeping best score per note
+        // usearch cosine distance: lower = more similar, score = 1.0 - distance
+        let mut best_by_note: HashMap<String, (u64, f32)> = HashMap::new();
+
+        for (chunk_id, distance) in raw {
+            let score = 1.0 - distance;
+            let chunk = match self.chunks.get_chunk_by_id(chunk_id)? {
+                Some(c) => c,
+                None => continue,
+            };
+            let entry = best_by_note
+                .entry(chunk.note_path.clone())
+                .or_insert((chunk_id, score));
+            if score > entry.1 {
+                *entry = (chunk_id, score);
+            }
+        }
+
+        // Build results, look up chunks again for position info
+        let mut results: Vec<VectorResult> = Vec::with_capacity(best_by_note.len());
+        for (note_path, (chunk_id, score)) in best_by_note {
+            let chunk = match self.chunks.get_chunk_by_id(chunk_id)? {
+                Some(c) => c,
+                None => continue,
+            };
+            results.push(VectorResult {
+                note_path,
+                chunk_preview: chunk.preview.clone(),
+                chunk_position: format!(
+                    "chunk {} of {}",
+                    chunk.chunk_index + 1,
+                    chunk.total_chunks
+                ),
+                score,
+            });
+        }
+
+        // Sort by score descending, take limit
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.truncate(limit);
+        Ok(results)
+    }
+
+    #[instrument(skip(self, bm25_results), fields(query_len = query.len(), bm25_count = bm25_results.len()))]
+    pub async fn hybrid_search(
+        &self,
+        query: &str,
+        limit: usize,
+        bm25_results: Vec<(String, f32)>,
+    ) -> Result<Vec<HybridResult>, VectorError> {
+        // Embed query and search HNSW (over-fetch)
+        let mut embeddings = self.embedder.embed(&[query]).await?;
+        let query_vec = embeddings.remove(0);
+
+        let index = self.vector.read().await;
+        let raw = index.search(&query_vec, limit * 3)?;
+        drop(index);
+
+        // Build BM25 rank map: note_path -> 0-based rank
+        let bm25_rank_map: HashMap<String, usize> = bm25_results
+            .iter()
+            .enumerate()
+            .map(|(rank, (path, _))| (path.clone(), rank))
+            .collect();
+
+        // Build vector rank map: deduplicate by note_path, keep best (lowest distance) chunk per note
+        // Also track the best chunk_id per note for later lookup
+        let mut best_vector_by_note: HashMap<String, (usize, u64, f32)> = HashMap::new();
+        // ranked_vector_notes: note_paths in rank order (0 = best)
+        let mut vector_note_order: Vec<String> = Vec::new();
+
+        for (chunk_id, distance) in &raw {
+            let chunk = match self.chunks.get_chunk_by_id(*chunk_id)? {
+                Some(c) => c,
+                None => continue,
+            };
+            if let std::collections::hash_map::Entry::Vacant(e) =
+                best_vector_by_note.entry(chunk.note_path)
+            {
+                let rank = vector_note_order.len();
+                vector_note_order.push(e.key().clone());
+                e.insert((rank, *chunk_id, 1.0 - distance));
+            }
+        }
+
+        let vector_rank_map: HashMap<String, usize> = best_vector_by_note
+            .iter()
+            .map(|(path, (rank, _, _))| (path.clone(), *rank))
+            .collect();
+
+        // Collect all unique note_paths from both result sets
+        let mut all_notes: Vec<String> = bm25_rank_map.keys().cloned().collect();
+        for path in vector_rank_map.keys() {
+            if !bm25_rank_map.contains_key(path) {
+                all_notes.push(path.clone());
+            }
+        }
+
+        let vector_weight = 1.0 - self.bm25_weight as f64;
+        let bm25_weight = self.bm25_weight as f64;
+
+        // Compute RRF scores
+        let mut scored: Vec<(String, f64, Option<usize>, Option<usize>)> =
+            Vec::with_capacity(all_notes.len());
+
+        for note_path in all_notes {
+            let bm25_rank = bm25_rank_map.get(&note_path).copied();
+            let vector_rank = vector_rank_map.get(&note_path).copied();
+
+            let bm25_contribution = bm25_rank
+                .map(|r| bm25_weight / (self.rrf_k + r as f64))
+                .unwrap_or(0.0);
+            let vector_contribution = vector_rank
+                .map(|r| vector_weight / (self.rrf_k + r as f64))
+                .unwrap_or(0.0);
+
+            let rrf_score = bm25_contribution + vector_contribution;
+            scored.push((note_path, rrf_score, bm25_rank, vector_rank));
+        }
+
+        // Sort by rrf_score descending, take limit
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+
+        // Build HybridResult, looking up chunk info
+        let mut results = Vec::with_capacity(scored.len());
+        for (note_path, rrf_score, bm25_rank, vector_rank) in scored {
+            let (preview, chunk_position) =
+                if let Some((_, chunk_id, _)) = best_vector_by_note.get(&note_path) {
+                    // Use the best vector chunk for this note
+                    match self.chunks.get_chunk_by_id(*chunk_id)? {
+                        Some(c) => (
+                            c.preview.clone(),
+                            format!("chunk {} of {}", c.chunk_index + 1, c.total_chunks),
+                        ),
+                        None => {
+                            // Fallback: first chunk from file
+                            get_first_chunk_info(&self.chunks, &note_path)?
+                        }
+                    }
+                } else {
+                    // BM25-only result: use first chunk from file
+                    get_first_chunk_info(&self.chunks, &note_path)?
+                };
+
+            results.push(HybridResult {
+                note_path,
+                chunk_preview: preview,
+                chunk_position,
+                rrf_score,
+                bm25_rank,
+                vector_rank,
+            });
+        }
+
+        Ok(results)
+    }
+}
+
+/// Look up the first chunk for a given file path, returning (preview, position).
+/// Falls back to empty strings if no chunks are indexed for the file.
+fn get_first_chunk_info(
+    chunks: &ChunkStore,
+    note_path: &str,
+) -> Result<(String, String), VectorError> {
+    let file_chunks = chunks.get_chunks_for_file(note_path)?;
+    if let Some(c) = file_chunks.into_iter().next() {
+        Ok((
+            c.preview.clone(),
+            format!("chunk {} of {}", c.chunk_index + 1, c.total_chunks),
+        ))
+    } else {
+        Ok((String::new(), String::from("chunk 1 of 1")))
+    }
+}

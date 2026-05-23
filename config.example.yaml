@@ -317,6 +317,69 @@ performance:
 #   security_auditing: true
 
 # ==============================================================================
+# VECTOR SEARCH (requires --features vector-search at build time)
+# ==============================================================================
+# Semantic / hybrid search powered by local HNSW index + ONNX embeddings.
+# Enable this block if turbovault was compiled with the vector-search feature.
+
+# vector_search:
+#   # Enable or disable semantic search entirely.
+#   # Default: false
+#   enabled: true
+#
+#   # Embedding model. Smaller = faster / less RAM; larger = better recall.
+#   # Supported values:
+#   #   "bge-small-en-v1.5"  — 33MB, 384d, fast (~4ms/query). Good default.
+#   #   "bge-base-en-v1.5"   — 110MB, 768d, stronger recall.
+#   #   "all-MiniLM-L6-v2"   — 22MB, 384d, very fast, slightly weaker recall.
+#   # Default: "bge-base-en-v1.5"
+#   model: bge-small-en-v1.5
+#
+#   # HNSW vector quantization — controls index RAM usage vs. recall quality.
+#   # "f16"  Half-precision float. ~2 KB/chunk. Recommended default.
+#   #        Negligible quality loss on unit-norm embeddings.
+#   # "f32"  Full-precision float. ~4 KB/chunk. Max recall, 2× the RAM of f16.
+#   # "i8"   Int8 quantized. ~1 KB/chunk. ~4× smaller than f32, minor quality
+#   #        trade-off. Good for very large vaults (10k+ notes).
+#   # Default: "f16"
+#   index_quantization: f16
+#
+#   # Maximum characters per text chunk. ~800 chars ≈ ~200 words.
+#   # Larger chunks = more context per result; smaller = finer granularity.
+#   # Default: 800
+#   chunk_max_chars: 800
+#
+#   # Characters of overlap carried from the previous chunk. Prevents context
+#   # from being cut off at chunk boundaries.
+#   # Default: 100
+#   chunk_overlap_chars: 100
+#
+#   # Reciprocal Rank Fusion constant k. Controls rank-score decay in hybrid
+#   # mode. Higher k = less sensitive to rank differences between BM25 and
+#   # vector results. Typical range: 20–100.
+#   # Default: 60.0
+#   rrf_k: 60.0
+#
+#   # BM25 weight in hybrid search (0.0 = pure vector, 1.0 = pure BM25).
+#   # 0.3 gives a slight BM25 boost that helps exact-term recall.
+#   # Default: 0.3
+#   bm25_weight: 0.3
+#
+#   # Automatically re-embed notes when files change via the notify watcher.
+#   # Disable if you prefer to trigger rebuilds manually via rebuild_vector_index.
+#   # Default: true
+#   auto_update: true
+#
+#   # Granularity for incremental updates: "file" or "paragraph".
+#   # "paragraph" is more precise; "file" is simpler and faster.
+#   # Default: "paragraph"
+#   incremental_granularity: paragraph
+#
+#   # Override the directory used to cache downloaded ONNX model files.
+#   # Empty (default) uses the platform cache dir (e.g. ~/.cache/huggingface).
+#   # model_cache_dir: /path/to/model/cache
+
+# ==============================================================================
 # TOOL VISIBILITY
 # ==============================================================================
 # Control which MCP tools are exposed to clients.

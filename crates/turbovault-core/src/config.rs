@@ -132,6 +132,53 @@ impl VaultConfigBuilder {
     }
 }
 
+/// Configuration for the optional vector search feature.
+///
+/// Parsed from config even without the `vector-search` feature flag so that
+/// config files remain valid regardless of build options.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorSearchConfig {
+    /// Enable vector search (also requires `--features vector-search` at build time).
+    pub enabled: bool,
+    /// Embedding model name. Supported: "bge-base-en-v1.5", "bge-small-en-v1.5", "all-MiniLM-L6-v2".
+    pub model: String,
+    /// Maximum chars per chunk (ceiling; paragraph boundaries are preferred). ~800 ≈ 200 words.
+    pub chunk_max_chars: usize,
+    /// Overlap chars carried from the previous chunk.
+    pub chunk_overlap_chars: usize,
+    /// RRF constant k (default 60.0). Controls rank-score decay rate.
+    pub rrf_k: f64,
+    /// Weight of BM25 in hybrid mode (0.0 = pure vector, 1.0 = pure BM25).
+    pub bm25_weight: f32,
+    /// Automatically re-embed notes when files change (via notify watcher).
+    pub auto_update: bool,
+    /// Granularity for incremental updates: "file" or "paragraph".
+    pub incremental_granularity: String,
+    /// Override fastembed model cache directory. Empty = use platform default.
+    pub model_cache_dir: String,
+    /// HNSW index vector quantization. One of: "f32" (full precision), "f16" (half precision,
+    /// default — halves index RAM with negligible quality loss on unit-norm embeddings), "i8"
+    /// (int8, ~4× smaller, minor quality trade-off).
+    pub index_quantization: String,
+}
+
+impl Default for VectorSearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: "bge-base-en-v1.5".to_string(),
+            chunk_max_chars: 800,
+            chunk_overlap_chars: 100,
+            rrf_k: 60.0,
+            bm25_weight: 0.3,
+            auto_update: true,
+            incremental_granularity: "paragraph".to_string(),
+            model_cache_dir: String::new(),
+            index_quantization: "f16".to_string(),
+        }
+    }
+}
+
 /// Global server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -174,6 +221,9 @@ pub struct ServerConfig {
     // Admin
     pub metrics_enabled: bool,
     pub debug_mode: bool,
+
+    // Vector search (requires --features vector-search at build time)
+    pub vector_search: VectorSearchConfig,
 }
 
 impl Default for ServerConfig {
@@ -210,6 +260,7 @@ impl Default for ServerConfig {
             multi_vault_enabled: false,
             metrics_enabled: false,
             debug_mode: false,
+            vector_search: VectorSearchConfig::default(),
         }
     }
 }

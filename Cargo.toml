@@ -8,6 +8,7 @@ members = [
     "crates/turbovault-export",
     "crates/turbovault-audit",
     "crates/turbovault-sql",
+    "crates/turbovault-vector",
     "crates/turbovault-tools",
     "crates/turbovault",
 ]
@@ -108,6 +109,7 @@ turbovault-batch = { version = "1.5.0", path = "crates/turbovault-batch" }
 turbovault-export = { version = "1.5.0", path = "crates/turbovault-export" }
 turbovault-audit = { version = "1.5.0", path = "crates/turbovault-audit" }
 turbovault-sql = { version = "1.5.0", path = "crates/turbovault-sql" }
+turbovault-vector = { version = "1.5.0", path = "crates/turbovault-vector" }
 turbovault-tools = { version = "1.5.0", path = "crates/turbovault-tools" }
 turbovault = { version = "1.5.0", path = "crates/turbovault" }
 

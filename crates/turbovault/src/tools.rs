@@ -21,6 +21,19 @@ use turbovault_vault::VaultManager;
 #[cfg(feature = "sql")]
 use turbovault_tools::FrontmatterSqlEngine;
 
+#[cfg(feature = "vector-search")]
+use turbovault_vector::{
+    ChunkStore, EmbeddingEngine, FastembedEngine, IndexBuilder, SearchRouter, VectorIndex,
+};
+
+/// Per-vault vector search state (lazy-initialized, cached).
+#[cfg(feature = "vector-search")]
+struct VaultVectorState {
+    router: Arc<SearchRouter>,
+    index: Arc<tokio::sync::RwLock<VectorIndex>>,
+    chunks: Arc<ChunkStore>,
+}
+
 /// A frontmatter key-value filter for advanced search
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct FrontmatterFilter {
@@ -370,6 +383,12 @@ pub struct ObsidianMcpServer {
     similarity_engines: Arc<RwLock<HashMap<String, Arc<SimilarityEngine>>>>,
     /// Search engines per vault (keyed by vault name, lazy-initialized)
     search_engines: Arc<RwLock<HashMap<String, Arc<SearchEngine>>>>,
+    /// Vector search state per vault (keyed by vault name, lazy-initialized)
+    #[cfg(feature = "vector-search")]
+    vector_states: Arc<RwLock<HashMap<String, Arc<VaultVectorState>>>>,
+    /// Shared embedding engine (one per process — model init is expensive)
+    #[cfg(feature = "vector-search")]
+    shared_embedder: Arc<tokio::sync::Mutex<Option<Arc<FastembedEngine>>>>,
 }
 
 impl ObsidianMcpServer {
@@ -388,6 +407,10 @@ impl ObsidianMcpServer {
             snapshot_stores: Arc::new(RwLock::new(HashMap::new())),
             similarity_engines: Arc::new(RwLock::new(HashMap::new())),
             search_engines: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "vector-search")]
+            vector_states: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(feature = "vector-search")]
+            shared_embedder: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 
@@ -402,6 +425,92 @@ impl ObsidianMcpServer {
     /// Get the multi-vault manager
     pub fn multi_vault(&self) -> Arc<MultiVaultManager> {
         self.multi_vault_mgr.clone()
+    }
+
+    /// Get or lazily initialize the shared fastembed embedding engine.
+    #[cfg(feature = "vector-search")]
+    async fn get_or_init_embedder(&self) -> McpResult<Arc<dyn EmbeddingEngine>> {
+        let mut guard = self.shared_embedder.lock().await;
+        if let Some(e) = guard.as_ref() {
+            return Ok(e.clone() as Arc<dyn EmbeddingEngine>);
+        }
+        let vc = turbovault_core::VectorSearchConfig::default();
+        let model_name = vc.model.clone();
+        let cache_dir: Option<std::path::PathBuf> = if vc.model_cache_dir.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(&vc.model_cache_dir))
+        };
+        let embedder =
+            tokio::task::spawn_blocking(move || FastembedEngine::new(&model_name, cache_dir))
+                .await
+                .map_err(|e| McpError::internal(format!("Embedder task failed: {e}")))?
+                .map_err(|e| McpError::internal(format!("Embedder init failed: {e}")))?;
+        let embedder = Arc::new(embedder);
+        *guard = Some(embedder.clone());
+        Ok(embedder as Arc<dyn EmbeddingEngine>)
+    }
+
+    /// Get or lazily initialize the per-vault vector search state.
+    #[cfg(feature = "vector-search")]
+    async fn get_vector_state(
+        &self,
+        vault_name: &str,
+        vault_path: &std::path::Path,
+    ) -> McpResult<Arc<VaultVectorState>> {
+        {
+            let cache = self.vector_states.read().await;
+            if let Some(s) = cache.get(vault_name) {
+                return Ok(s.clone());
+            }
+        }
+
+        let vc = turbovault_core::VectorSearchConfig::default();
+        let vector_dir = vault_path.join(".turbovault").join("vectors");
+        tokio::fs::create_dir_all(&vector_dir)
+            .await
+            .map_err(|e| McpError::internal(format!("Failed to create vector dir: {e}")))?;
+
+        let chunks = Arc::new(
+            ChunkStore::open(&vector_dir.join("state.db"))
+                .map_err(|e| McpError::internal(format!("Failed to open chunk store: {e}")))?,
+        );
+
+        let embedder = self.get_or_init_embedder().await?;
+        let dims = embedder.dimensions();
+
+        let index = VectorIndex::open_or_create(&vector_dir.join("hnsw.idx"), dims, &vc.index_quantization)
+            .map_err(|e| McpError::internal(format!("Failed to open vector index: {e}")))?;
+
+        // Warn on model mismatch (stale index — user should call rebuild_vector_index)
+        if let Ok(Some((stored_model, stored_dims))) = chunks.get_model_meta()
+            && (stored_model != vc.model || stored_dims != dims)
+        {
+            log::warn!(
+                "Vector index model mismatch for vault '{vault_name}': stored={stored_model}:{stored_dims}, current={}:{dims}. Call rebuild_vector_index to fix.",
+                vc.model,
+            );
+        }
+
+        let index = Arc::new(tokio::sync::RwLock::new(index));
+        let router = Arc::new(SearchRouter::new(
+            index.clone(),
+            embedder,
+            chunks.clone(),
+            vc.rrf_k,
+            vc.bm25_weight,
+        ));
+
+        let state = Arc::new(VaultVectorState {
+            router,
+            index,
+            chunks,
+        });
+        self.vector_states
+            .write()
+            .await
+            .insert(vault_name.to_string(), state.clone());
+        Ok(state)
     }
 
     /// Helper to save vault state to cache
@@ -3596,5 +3705,131 @@ impl ObsidianMcpServer {
         .with_duration(start.elapsed().as_millis() as u64)
         .with_next_steps(&["audit_log", "explain_vault"])
         .to_json()
+    }
+
+    // ─── VECTOR SEARCH TOOLS ─────────────────────────────────────────
+
+    #[tool(
+        description = "Dense-vector semantic search using local ONNX embeddings (fastembed + HNSW). Finds conceptually similar notes even with zero keyword overlap. Hybrid mode fuses BM25 and vector rankings via Reciprocal Rank Fusion for best overall quality.",
+        usage = "Use instead of semantic_search when you need synonym/paraphrase matching or when keyword search misses conceptually relevant notes. Requires the binary to be compiled with --features vector-search AND vector_search.enabled=true in config.",
+        performance = "2-10ms per query on warm index. First call downloads ~80MB ONNX model and builds the index.",
+        related = ["semantic_search", "search", "advanced_search", "rebuild_vector_index"],
+        examples = [
+            "vector_search(query='automatically update running containers without downtime')",
+            "vector_search(query='embedding similarity nearest neighbor', mode='vector')",
+            "vector_search(query='code review pull request pipeline', limit=20, mode='hybrid')"
+        ],
+        tags = ["read", "search", "semantic"],
+        read_only = true,
+    )]
+    async fn vector_search(
+        &self,
+        query: String,
+        limit: Option<usize>,
+        mode: Option<String>,
+    ) -> McpResult<serde_json::Value> {
+        #[cfg(not(feature = "vector-search"))]
+        {
+            let _ = (query, limit, mode);
+            Err(McpError::internal(
+                "vector-search feature not compiled in. Rebuild with: cargo build --features vector-search".to_string(),
+            ))
+        }
+
+        #[cfg(feature = "vector-search")]
+        {
+            let start = std::time::Instant::now();
+            let (vault_name, manager) = self.get_vault_pair().await?;
+            let vault_path = manager.vault_path().clone();
+            let state = self.get_vector_state(&vault_name, &vault_path).await?;
+            let limit = limit.unwrap_or(10);
+            let mode = mode.as_deref().unwrap_or("hybrid");
+
+            let result_value = match mode {
+                "vector" => {
+                    let results =
+                        state.router.vector_only(&query, limit).await.map_err(|e| {
+                            McpError::internal(format!("Vector search failed: {e}"))
+                        })?;
+                    serde_json::to_value(&results).map_err(|e| McpError::internal(e.to_string()))?
+                }
+                _ => {
+                    // hybrid: fetch BM25 results then fuse
+                    let engine = self.get_search_engine(&vault_name, &manager).await?;
+                    let bm25 = engine.search(&query).await.map_err(to_mcp_error)?;
+                    let bm25_pairs: Vec<(String, f32)> = bm25
+                        .iter()
+                        .map(|r| (r.path.clone(), r.score as f32))
+                        .collect();
+                    let results = state
+                        .router
+                        .hybrid_search(&query, limit, bm25_pairs)
+                        .await
+                        .map_err(|e| McpError::internal(format!("Hybrid search failed: {e}")))?;
+                    serde_json::to_value(&results).map_err(|e| McpError::internal(e.to_string()))?
+                }
+            };
+
+            StandardResponse::new(&vault_name, "vector_search", result_value)
+                .with_count(limit)
+                .with_duration(start.elapsed().as_millis() as u64)
+                .with_next_steps(&["read_note", "semantic_search", "rebuild_vector_index"])
+                .to_json()
+        }
+    }
+
+    #[tool(
+        description = "Rebuild the vector search index from scratch for the active vault. Scans all notes, computes embeddings, and writes a fresh HNSW index. Use after bulk imports or if the index is stale.",
+        usage = "Call when vector_search returns stale or incorrect results, after adding many new notes, or after changing the embedding model in config.",
+        performance = "~50-200ms per note (embedding). A 2000-note vault takes ~2-4 minutes on first run.",
+        related = ["vector_search", "semantic_search"],
+        examples = ["rebuild_vector_index()"],
+        tags = ["admin", "semantic"],
+        read_only = false,
+    )]
+    async fn rebuild_vector_index(&self) -> McpResult<serde_json::Value> {
+        #[cfg(not(feature = "vector-search"))]
+        {
+            Err(McpError::internal(
+                "vector-search feature not compiled in. Rebuild with: cargo build --features vector-search".to_string(),
+            ))
+        }
+
+        #[cfg(feature = "vector-search")]
+        {
+            let start = std::time::Instant::now();
+            let (vault_name, manager) = self.get_vault_pair().await?;
+            let vault_path = manager.vault_path().clone();
+            let state = self.get_vector_state(&vault_name, &vault_path).await?;
+            let vc = turbovault_core::VectorSearchConfig::default();
+
+            let embedder = self.get_or_init_embedder().await?;
+            let builder = IndexBuilder::new(
+                embedder,
+                state.chunks.clone(),
+                vc.chunk_max_chars,
+                vc.chunk_overlap_chars,
+            );
+
+            let mut index = state.index.write().await;
+            let stats = builder
+                .full_rebuild(&vault_path, &mut index)
+                .await
+                .map_err(|e| McpError::internal(format!("Rebuild failed: {e}")))?;
+
+            StandardResponse::new(
+                &vault_name,
+                "rebuild_vector_index",
+                serde_json::json!({
+                    "notes_indexed": stats.notes_indexed,
+                    "chunks_created": stats.chunks_created,
+                    "model": stats.model,
+                    "elapsed_ms": stats.elapsed_ms,
+                }),
+            )
+            .with_duration(start.elapsed().as_millis() as u64)
+            .with_next_step("vector_search")
+            .to_json()
+        }
     }
 }
