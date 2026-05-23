@@ -1,4 +1,5 @@
 use crate::error::VectorError;
+use crate::require_feature;
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "local")]
@@ -31,14 +32,12 @@ pub struct VectorIndex {
 }
 
 impl VectorIndex {
-    pub fn open_or_create(path: &Path, dims: usize, quantization: &str) -> Result<Self, VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = (path, dims, quantization);
-            return Err(VectorError::Index(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+    pub fn open_or_create(
+        path: &Path,
+        dims: usize,
+        quantization: &str,
+    ) -> Result<Self, VectorError> {
+        require_feature!(Index, path, dims, quantization);
 
         #[cfg(feature = "local")]
         {
@@ -103,13 +102,7 @@ impl VectorIndex {
     }
 
     pub fn upsert(&mut self, id: u64, vector: &[f32]) -> Result<(), VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = (id, vector);
-            return Err(VectorError::Index(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Index, id, vector);
 
         #[cfg(feature = "local")]
         {
@@ -139,13 +132,7 @@ impl VectorIndex {
     }
 
     pub fn remove(&mut self, id: u64) -> Result<(), VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = id;
-            return Err(VectorError::Index(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Index, id);
 
         #[cfg(feature = "local")]
         {
@@ -158,13 +145,7 @@ impl VectorIndex {
     }
 
     pub fn search(&self, query: &[f32], top_k: usize) -> Result<Vec<(u64, f32)>, VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = (query, top_k);
-            return Err(VectorError::Index(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Index, query, top_k);
 
         #[cfg(feature = "local")]
         {
@@ -176,23 +157,23 @@ impl VectorIndex {
                 .search(query, top_k)
                 .map_err(|e| VectorError::Index(e.to_string()))?;
 
-            let mut results: Vec<(u64, f32)> =
-                matches.keys.into_iter().zip(matches.distances).collect();
+            let mut results: Vec<(u64, f32)> = matches
+                .keys
+                .into_iter()
+                .zip(matches.distances)
+                .map(|(id, dist)| (id, 1.0 - dist))
+                .collect();
 
-            // Sort ascending by distance (closest first).
-            results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            // Sort by score descending (highest similarity first).
+            results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             Ok(results)
         }
     }
 
-    /// Saves the index to disk atomically, then returns to mmap (view) mode to free heap RAM.
+    /// Search the index and return `(chunk_id, score)` pairs sorted by score descending.
+    /// Score is `1.0 - cosine_distance` so higher = more similar.
     pub fn flush(&mut self) -> Result<(), VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            return Err(VectorError::Index(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Index);
 
         #[cfg(feature = "local")]
         {
@@ -207,7 +188,18 @@ impl VectorIndex {
                 .save(&tmp_str)
                 .map_err(|e| VectorError::Index(e.to_string()))?;
 
+            // usearch::Index::save() already flushes its internal buffers to
+            // the OS.  The rename itself is atomic on most platforms.  We try
+            // to sync the parent directory as a best-effort durability step;
+            // on Windows the temp file may still be locked by usearch, making
+            // File::open fail with PermissionDenied, so we ignore that error.
             std::fs::rename(&tmp_path, &self.path)?;
+
+            let _ = self
+                .path
+                .parent()
+                .and_then(|p| std::fs::File::open(p).ok())
+                .and_then(|f| f.sync_all().ok());
 
             // Drop heap memory and re-open as mmap view.
             let path_str = self.path.to_string_lossy().to_string();

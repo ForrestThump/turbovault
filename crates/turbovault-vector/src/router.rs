@@ -1,4 +1,7 @@
-use crate::{EmbeddingEngine, VectorError, VectorIndex, chunks::ChunkStore};
+use crate::{
+    EmbeddingEngine, VectorError, VectorIndex,
+    chunks::{Chunk, ChunkStore},
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -65,31 +68,23 @@ impl SearchRouter {
         let raw = index.search(&query_vec, limit * 3)?;
         drop(index);
 
-        // Deduplicate by note_path, keeping best score per note
-        // usearch cosine distance: lower = more similar, score = 1.0 - distance
-        let mut best_by_note: HashMap<String, (u64, f32)> = HashMap::new();
+        // Deduplicate by note_path keeping best score per note.
+        // Results are sorted by score descending, so the first chunk seen
+        // for each note is the best. Cache the Chunk to avoid a second lookup.
+        let mut best_by_note: HashMap<String, (Chunk, f32)> = HashMap::new();
 
-        for (chunk_id, distance) in raw {
-            let score = 1.0 - distance;
+        for (chunk_id, score) in raw {
             let chunk = match self.chunks.get_chunk_by_id(chunk_id)? {
                 Some(c) => c,
                 None => continue,
             };
-            let entry = best_by_note
-                .entry(chunk.note_path.clone())
-                .or_insert((chunk_id, score));
-            if score > entry.1 {
-                *entry = (chunk_id, score);
-            }
+            let note_path = chunk.note_path.clone();
+            // Only the first (highest-scoring) chunk per note is kept.
+            let _ = best_by_note.entry(note_path).or_insert((chunk, score));
         }
 
-        // Build results, look up chunks again for position info
         let mut results: Vec<VectorResult> = Vec::with_capacity(best_by_note.len());
-        for (note_path, (chunk_id, score)) in best_by_note {
-            let chunk = match self.chunks.get_chunk_by_id(chunk_id)? {
-                Some(c) => c,
-                None => continue,
-            };
+        for (note_path, (chunk, score)) in best_by_note {
             results.push(VectorResult {
                 note_path,
                 chunk_preview: chunk.preview.clone(),
@@ -134,13 +129,13 @@ impl SearchRouter {
             .map(|(rank, (path, _))| (path.clone(), rank))
             .collect();
 
-        // Build vector rank map: deduplicate by note_path, keep best (lowest distance) chunk per note
+        // Build vector rank map: deduplicate by note_path, keep best score per note
         // Also track the best chunk_id per note for later lookup
         let mut best_vector_by_note: HashMap<String, (usize, u64, f32)> = HashMap::new();
         // ranked_vector_notes: note_paths in rank order (0 = best)
         let mut vector_note_order: Vec<String> = Vec::new();
 
-        for (chunk_id, distance) in &raw {
+        for (chunk_id, score) in &raw {
             let chunk = match self.chunks.get_chunk_by_id(*chunk_id)? {
                 Some(c) => c,
                 None => continue,
@@ -150,7 +145,7 @@ impl SearchRouter {
             {
                 let rank = vector_note_order.len();
                 vector_note_order.push(e.key().clone());
-                e.insert((rank, *chunk_id, 1.0 - distance));
+                e.insert((rank, *chunk_id, *score));
             }
         }
 

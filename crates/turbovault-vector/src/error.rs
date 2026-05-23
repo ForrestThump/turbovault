@@ -1,3 +1,37 @@
+/// Guard a method body behind `#[cfg(feature = "local")]`, returning an error
+/// when the feature is disabled.
+///
+/// # Usage
+///
+/// ```ignore
+/// fn do_thing(&self, path: &str) -> Result<(), VectorError> {
+///     require_feature!(Database, path);
+///
+///     #[cfg(feature = "local")]
+///     { /* real implementation */ }
+/// }
+/// ```
+#[macro_export]
+macro_rules! require_feature {
+    ($variant:ident) => {
+        #[cfg(not(feature = "local"))]
+        {
+            return Err(VectorError::$variant(
+                "vector-search feature not compiled in".to_string(),
+            ));
+        }
+    };
+    ($variant:ident, $($param:expr),+ $(,)?) => {
+        #[cfg(not(feature = "local"))]
+        {
+            let _ = ($($param),+);
+            return Err(VectorError::$variant(
+                "vector-search feature not compiled in".to_string(),
+            ));
+        }
+    };
+}
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]

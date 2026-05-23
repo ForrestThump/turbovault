@@ -574,7 +574,8 @@ fn bench_index_build(c: &mut Criterion) {
                         Arc::new(FastembedEngine::new("bge-small-en-v1.5", None).unwrap());
                     let dims = embedder.dimensions();
                     let mut index =
-                        VectorIndex::open_or_create(&vector_dir.join("hnsw.idx"), dims, "f16").unwrap();
+                        VectorIndex::open_or_create(&vector_dir.join("hnsw.idx"), dims, "f16")
+                            .unwrap();
                     let builder = IndexBuilder::new(embedder, chunks, 800, 100);
 
                     black_box(builder.full_rebuild(vault_path, &mut index).await.unwrap());

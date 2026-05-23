@@ -1,4 +1,5 @@
 use crate::error::VectorError;
+use crate::require_feature;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -29,16 +30,6 @@ CREATE TABLE IF NOT EXISTS files (
     mtime        INTEGER NOT NULL,
     content_hash TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS paragraphs (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_path    TEXT NOT NULL,
-    para_index   INTEGER NOT NULL,
-    start_byte   INTEGER NOT NULL,
-    end_byte     INTEGER NOT NULL,
-    content_hash TEXT NOT NULL,
-    UNIQUE(file_path, para_index),
-    FOREIGN KEY(file_path) REFERENCES files(path) ON DELETE CASCADE
-);
 CREATE TABLE IF NOT EXISTS chunks (
     id           INTEGER PRIMARY KEY,
     file_path    TEXT NOT NULL,
@@ -48,13 +39,22 @@ CREATE TABLE IF NOT EXISTS chunks (
     end_byte     INTEGER NOT NULL,
     content_hash TEXT NOT NULL,
     preview      TEXT NOT NULL,
-    UNIQUE(file_path, chunk_index)
+    UNIQUE(file_path, chunk_index),
+    FOREIGN KEY(file_path) REFERENCES files(path) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS idx_chunks_file     ON chunks(file_path);
-CREATE INDEX IF NOT EXISTS idx_paragraphs_file ON paragraphs(file_path);
+CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_path);
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 ";
+
+#[cfg(feature = "local")]
+const INSERT_CHUNK_SQL: &str = "INSERT OR REPLACE INTO chunks \
+     (id, file_path, chunk_index, total_chunks, start_byte, end_byte, content_hash, preview) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+
+#[cfg(feature = "local")]
+const UPSERT_FILE_SQL: &str =
+    "INSERT OR REPLACE INTO files (path, mtime, content_hash) VALUES (?1, ?2, ?3)";
 
 /// SQLite-backed store mapping chunk IDs <-> notes + paragraph hashes.
 pub struct ChunkStore {
@@ -66,13 +66,7 @@ pub struct ChunkStore {
 
 impl ChunkStore {
     pub fn open(db_path: &Path) -> Result<Self, VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = db_path;
-            return Err(VectorError::Database(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Database, db_path);
 
         #[cfg(feature = "local")]
         {
@@ -80,6 +74,20 @@ impl ChunkStore {
                 Connection::open(db_path).map_err(|e| VectorError::Database(e.to_string()))?;
             conn.execute_batch(SCHEMA_SQL)
                 .map_err(|e| VectorError::Database(e.to_string()))?;
+
+            // Initialize sequence counter from existing data.
+            let max_id: i64 = conn
+                .query_row("SELECT COALESCE(MAX(id), 0) FROM chunks", [], |row| {
+                    row.get(0)
+                })
+                .map_err(|e| VectorError::Database(e.to_string()))?;
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('max_chunk_id', ?1) \
+                 ON CONFLICT(key) DO NOTHING",
+                params![max_id.to_string()],
+            )
+            .map_err(|e| VectorError::Database(e.to_string()))?;
+
             Ok(Self {
                 conn: Mutex::new(conn),
             })
@@ -87,17 +95,11 @@ impl ChunkStore {
     }
 
     pub fn get_chunks_for_file(&self, path: &str) -> Result<Vec<Chunk>, VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = path;
-            return Err(VectorError::Database(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Database, path);
 
         #[cfg(feature = "local")]
         {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.conn.lock().expect("ChunkStore mutex poisoned");
             let mut stmt = conn
                 .prepare(
                     "SELECT id, file_path, chunk_index, total_chunks, start_byte, end_byte, \
@@ -128,50 +130,12 @@ impl ChunkStore {
         }
     }
 
-    pub fn insert_chunk(&self, chunk: &Chunk) -> Result<(), VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = chunk;
-            return Err(VectorError::Database(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
-
-        #[cfg(feature = "local")]
-        {
-            let conn = self.conn.lock().unwrap();
-            conn.execute(
-                "INSERT OR REPLACE INTO chunks \
-                 (id, file_path, chunk_index, total_chunks, start_byte, end_byte, content_hash, preview) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    chunk.id as i64,
-                    chunk.note_path,
-                    chunk.chunk_index as i64,
-                    chunk.total_chunks as i64,
-                    chunk.start_byte as i64,
-                    chunk.end_byte as i64,
-                    chunk.content_hash,
-                    chunk.preview,
-                ],
-            )
-            .map_err(|e| VectorError::Database(e.to_string()))?;
-            Ok(())
-        }
-    }
-
     pub fn delete_chunks_for_file(&self, path: &str) -> Result<Vec<u64>, VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = path;
-            return Err(VectorError::Database(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Database, path);
 
         #[cfg(feature = "local")]
         {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.conn.lock().expect("ChunkStore mutex poisoned");
             // Collect IDs first.
             let mut stmt = conn
                 .prepare("SELECT id FROM chunks WHERE file_path = ?1")
@@ -193,22 +157,22 @@ impl ChunkStore {
     }
 
     pub fn get_file_mtime(&self, path: &str) -> Result<Option<i64>, VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = path;
-            return Err(VectorError::Database(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        Ok(self.get_file_info(path)?.map(|(m, _)| m))
+    }
+
+    pub fn get_file_info(&self, path: &str) -> Result<Option<(i64, String)>, VectorError> {
+        require_feature!(Database, path);
 
         #[cfg(feature = "local")]
         {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.conn.lock().expect("ChunkStore mutex poisoned");
             let mut stmt = conn
-                .prepare("SELECT mtime FROM files WHERE path = ?1")
+                .prepare("SELECT mtime, content_hash FROM files WHERE path = ?1")
                 .map_err(|e| VectorError::Database(e.to_string()))?;
             let mut rows = stmt
-                .query_map(params![path], |row| row.get::<_, i64>(0))
+                .query_map(params![path], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
                 .map_err(|e| VectorError::Database(e.to_string()))?;
             match rows.next() {
                 Some(r) => Ok(Some(r.map_err(|e| VectorError::Database(e.to_string()))?)),
@@ -218,37 +182,23 @@ impl ChunkStore {
     }
 
     pub fn upsert_file(&self, path: &str, mtime: i64, hash: &str) -> Result<(), VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = (path, mtime, hash);
-            return Err(VectorError::Database(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Database, path, mtime, hash);
 
         #[cfg(feature = "local")]
         {
-            let conn = self.conn.lock().unwrap();
-            conn.execute(
-                "INSERT OR REPLACE INTO files (path, mtime, content_hash) VALUES (?1, ?2, ?3)",
-                params![path, mtime, hash],
-            )
-            .map_err(|e| VectorError::Database(e.to_string()))?;
+            let conn = self.conn.lock().expect("ChunkStore mutex poisoned");
+            conn.execute(UPSERT_FILE_SQL, params![path, mtime, hash])
+                .map_err(|e| VectorError::Database(e.to_string()))?;
             Ok(())
         }
     }
 
     pub fn all_indexed_paths(&self) -> Result<Vec<String>, VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            return Err(VectorError::Database(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Database);
 
         #[cfg(feature = "local")]
         {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.conn.lock().expect("ChunkStore mutex poisoned");
             let mut stmt = conn
                 .prepare("SELECT path FROM files ORDER BY path")
                 .map_err(|e| VectorError::Database(e.to_string()))?;
@@ -262,16 +212,11 @@ impl ChunkStore {
     }
 
     pub fn get_model_meta(&self) -> Result<Option<(String, usize)>, VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            return Err(VectorError::Database(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Database);
 
         #[cfg(feature = "local")]
         {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.conn.lock().expect("ChunkStore mutex poisoned");
             let mut stmt = conn
                 .prepare("SELECT key, value FROM meta WHERE key IN ('model', 'embedding_dims')")
                 .map_err(|e| VectorError::Database(e.to_string()))?;
@@ -301,17 +246,11 @@ impl ChunkStore {
     }
 
     pub fn set_model_meta(&self, model: &str, dims: usize) -> Result<(), VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = (model, dims);
-            return Err(VectorError::Database(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Database, model, dims);
 
         #[cfg(feature = "local")]
         {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.conn.lock().expect("ChunkStore mutex poisoned");
             conn.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES ('model', ?1)",
                 params![model],
@@ -327,16 +266,11 @@ impl ChunkStore {
     }
 
     pub fn clear_all(&self) -> Result<(), VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            return Err(VectorError::Database(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Database);
 
         #[cfg(feature = "local")]
         {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.conn.lock().expect("ChunkStore mutex poisoned");
             conn.execute_batch(
                 "DELETE FROM chunks; DELETE FROM paragraphs; DELETE FROM files; DELETE FROM meta;",
             )
@@ -348,17 +282,11 @@ impl ChunkStore {
     /// Lightweight query for diffing: returns `(id, content_hash)` pairs ordered by chunk_index,
     /// avoiding deserializing the full Chunk struct when only these two fields are needed.
     pub fn get_chunk_hashes_for_file(&self, path: &str) -> Result<Vec<(u64, String)>, VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = path;
-            return Err(VectorError::Database(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Database, path);
 
         #[cfg(feature = "local")]
         {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.conn.lock().expect("ChunkStore mutex poisoned");
             let mut stmt = conn
                 .prepare(
                     "SELECT id, content_hash FROM chunks WHERE file_path = ?1 ORDER BY chunk_index",
@@ -391,32 +319,21 @@ impl ChunkStore {
         file_hash: &str,
         chunks: &[Chunk],
     ) -> Result<(), VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = (file_path, mtime, file_hash, chunks);
-            return Err(VectorError::Database(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Database, file_path, mtime, file_hash, chunks);
 
         #[cfg(feature = "local")]
         {
-            let mut conn = self.conn.lock().unwrap();
+            let mut conn = self.conn.lock().expect("ChunkStore mutex poisoned");
             let tx = conn
                 .transaction()
                 .map_err(|e| VectorError::Database(e.to_string()))?;
 
-            tx.execute(
-                "INSERT OR REPLACE INTO files (path, mtime, content_hash) VALUES (?1, ?2, ?3)",
-                params![file_path, mtime, file_hash],
-            )
-            .map_err(|e| VectorError::Database(e.to_string()))?;
+            tx.execute(UPSERT_FILE_SQL, params![file_path, mtime, file_hash])
+                .map_err(|e| VectorError::Database(e.to_string()))?;
 
             for chunk in chunks {
                 tx.execute(
-                    "INSERT OR REPLACE INTO chunks \
-                     (id, file_path, chunk_index, total_chunks, start_byte, end_byte, content_hash, preview) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    INSERT_CHUNK_SQL,
                     params![
                         chunk.id as i64,
                         chunk.note_path,
@@ -431,7 +348,8 @@ impl ChunkStore {
                 .map_err(|e| VectorError::Database(e.to_string()))?;
             }
 
-            tx.commit().map_err(|e| VectorError::Database(e.to_string()))?;
+            tx.commit()
+                .map_err(|e| VectorError::Database(e.to_string()))?;
             Ok(())
         }
     }
@@ -446,19 +364,16 @@ impl ChunkStore {
         delete_ids: &[u64],
         chunks: &[Chunk],
     ) -> Result<(), VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = (file_path, mtime, file_hash, delete_ids, chunks);
-            return Err(VectorError::Database(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Database, file_path, mtime, file_hash, delete_ids, chunks);
 
         #[cfg(feature = "local")]
         {
-            let mut conn = self.conn.lock().unwrap();
+            let mut conn = self.conn.lock().expect("ChunkStore mutex poisoned");
             let tx = conn
                 .transaction()
+                .map_err(|e| VectorError::Database(e.to_string()))?;
+
+            tx.execute(UPSERT_FILE_SQL, params![file_path, mtime, file_hash])
                 .map_err(|e| VectorError::Database(e.to_string()))?;
 
             if !delete_ids.is_empty() {
@@ -473,9 +388,7 @@ impl ChunkStore {
 
             for chunk in chunks {
                 tx.execute(
-                    "INSERT OR REPLACE INTO chunks \
-                     (id, file_path, chunk_index, total_chunks, start_byte, end_byte, content_hash, preview) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    INSERT_CHUNK_SQL,
                     params![
                         chunk.id as i64,
                         chunk.note_path,
@@ -490,13 +403,8 @@ impl ChunkStore {
                 .map_err(|e| VectorError::Database(e.to_string()))?;
             }
 
-            tx.execute(
-                "INSERT OR REPLACE INTO files (path, mtime, content_hash) VALUES (?1, ?2, ?3)",
-                params![file_path, mtime, file_hash],
-            )
-            .map_err(|e| VectorError::Database(e.to_string()))?;
-
-            tx.commit().map_err(|e| VectorError::Database(e.to_string()))?;
+            tx.commit()
+                .map_err(|e| VectorError::Database(e.to_string()))?;
             Ok(())
         }
     }
@@ -507,13 +415,7 @@ impl ChunkStore {
             return Ok(());
         }
 
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = ids;
-            return Err(VectorError::Database(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Database, ids);
 
         #[cfg(feature = "local")]
         {
@@ -522,7 +424,7 @@ impl ChunkStore {
                 .join(",");
             let sql = format!("DELETE FROM chunks WHERE id IN ({placeholders})");
             let params: Vec<i64> = ids.iter().map(|&id| id as i64).collect();
-            let conn = self.conn.lock().unwrap();
+            let conn = self.conn.lock().expect("ChunkStore mutex poisoned");
             conn.execute(&sql, rusqlite::params_from_iter(params.iter()))
                 .map_err(|e| VectorError::Database(e.to_string()))?;
             Ok(())
@@ -530,35 +432,43 @@ impl ChunkStore {
     }
 
     pub fn next_chunk_id(&self) -> Result<u64, VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            return Err(VectorError::Database(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        self.allocate_chunk_ids(1)
+    }
+
+    /// Atomically reserve a contiguous range of chunk IDs inside the mutex.
+    /// Uses a `max_chunk_id` entry in the meta table as an atomic counter so that
+    /// parallel callers cannot observe the same MAX(id) and produce duplicates.
+    fn allocate_chunk_ids(&self, count: u64) -> Result<u64, VectorError> {
+        require_feature!(Database, count);
 
         #[cfg(feature = "local")]
         {
-            let conn = self.conn.lock().unwrap();
-            let max_id: Option<i64> = conn
-                .query_row("SELECT MAX(id) FROM chunks", [], |row| row.get(0))
+            let conn = self.conn.lock().expect("ChunkStore mutex poisoned");
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('max_chunk_id', '0') \
+                 ON CONFLICT(key) DO NOTHING",
+                [],
+            )
+            .map_err(|e| VectorError::Database(e.to_string()))?;
+            let next: i64 = conn
+                .query_row(
+                    "UPDATE meta SET value = CAST(CAST(value AS INTEGER) + ?1 AS TEXT) \
+                 WHERE key = 'max_chunk_id' \
+                 RETURNING CAST(value AS INTEGER)",
+                    params![count as i64],
+                    |row| row.get(0),
+                )
                 .map_err(|e| VectorError::Database(e.to_string()))?;
-            Ok(max_id.map(|v| (v + 1) as u64).unwrap_or(1))
+            Ok((next - count as i64 + 1) as u64)
         }
     }
 
     pub fn get_chunk_by_id(&self, id: u64) -> Result<Option<Chunk>, VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = id;
-            return Err(VectorError::Database(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Database, id);
 
         #[cfg(feature = "local")]
         {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.conn.lock().expect("ChunkStore mutex poisoned");
             let mut stmt = conn
                 .prepare(
                     "SELECT id, file_path, chunk_index, total_chunks, start_byte, end_byte, \
@@ -629,7 +539,9 @@ mod tests {
             make_chunk(2, "a.md", 1, 3, "hash_b"),
             make_chunk(3, "a.md", 2, 3, "hash_c"),
         ];
-        store.insert_chunks_tx("a.md", 1000, "filehash", &chunks).unwrap();
+        store
+            .insert_chunks_tx("a.md", 1000, "filehash", &chunks)
+            .unwrap();
 
         let result = store.get_chunk_hashes_for_file("a.md").unwrap();
         assert_eq!(result.len(), 3);
@@ -660,7 +572,9 @@ mod tests {
             make_chunk(10, "f.md", 0, 2, "h0"),
             make_chunk(11, "f.md", 1, 2, "h1"),
         ];
-        store.insert_chunks_tx("f.md", 999, "fhash", &chunks).unwrap();
+        store
+            .insert_chunks_tx("f.md", 999, "fhash", &chunks)
+            .unwrap();
 
         // Both chunks and the file record should be present.
         let hashes = store.get_chunk_hashes_for_file("f.md").unwrap();
@@ -735,19 +649,34 @@ mod tests {
     }
 
     #[test]
-    fn next_chunk_id_increments_after_insert() {
+    fn next_chunk_id_increments_monotonically() {
         let (store, _dir) = open_store();
-        assert_eq!(store.next_chunk_id().unwrap(), 1);
+        // Sequence initialised from MAX(id) = 0 → next = 1.
+        let id1 = store.next_chunk_id().unwrap();
+        assert_eq!(id1, 1);
 
         store
-            .insert_chunks_tx("a.md", 1, "h", &[make_chunk(1, "a.md", 0, 1, "ha")])
+            .insert_chunks_tx("a.md", 1, "h", &[make_chunk(id1, "a.md", 0, 1, "ha")])
             .unwrap();
-        assert_eq!(store.next_chunk_id().unwrap(), 2);
+        let id2 = store.next_chunk_id().unwrap();
+        assert_eq!(id2, 2);
+
+        // Use allocated IDs so sequence and stored ids are in sync.
+        let id3 = store.next_chunk_id().unwrap();
+        let id4 = store.next_chunk_id().unwrap();
 
         store
-            .insert_chunks_tx("b.md", 2, "h2", &[make_chunk(10, "b.md", 0, 1, "hb")])
+            .insert_chunks_tx(
+                "b.md",
+                2,
+                "h2",
+                &[
+                    make_chunk(id3, "b.md", 0, 2, "hb1"),
+                    make_chunk(id4, "b.md", 1, 2, "hb2"),
+                ],
+            )
             .unwrap();
-        assert_eq!(store.next_chunk_id().unwrap(), 11);
+        assert_eq!(store.next_chunk_id().unwrap(), id4 + 1);
     }
 }
 
@@ -809,9 +738,16 @@ pub fn chunk_text(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<(us
     for i in 1..segments.len() {
         let (prev_start, prev_end) = segments[i - 1];
         let (cur_start, cur_end) = segments[i];
-        let prev_len = prev_end.saturating_sub(prev_start);
-        let back = overlap_chars.min(prev_len);
-        let new_start = cur_start.saturating_sub(back);
+        // Walk back from prev_end by up to `overlap_chars` characters so the
+        // byte offset always lands on a valid char boundary.
+        let prev_slice = &text[prev_start..prev_end];
+        let overlap_bytes: usize = prev_slice
+            .chars()
+            .rev()
+            .take(overlap_chars)
+            .map(|c| c.len_utf8())
+            .sum();
+        let new_start = cur_start.saturating_sub(overlap_bytes);
         result.push((new_start, cur_end));
     }
 
@@ -829,21 +765,38 @@ fn split_paragraph(para: &str, base: usize, max_chars: usize, segments: &mut Vec
         return;
     }
 
-    // Too long — split on ". " sentence boundaries.
+    // Too long — split on sentence boundaries ( ".", "!", "?", "。" ).
+    let split_chars = [". ", "! ", "? ", "。"];
     let mut sent_start_byte: usize = 0;
     let mut sent_remaining = para;
 
     loop {
-        match sent_remaining.find(". ") {
+        match sent_remaining
+            .find(split_chars[0])
+            .or_else(|| sent_remaining.find(split_chars[1]))
+            .or_else(|| sent_remaining.find(split_chars[2]))
+            .or_else(|| sent_remaining.find(split_chars[3]))
+        {
             Some(pos) => {
-                // Sentence ends after the period (inclusive).
-                let sentence = &sent_remaining[..pos + 1];
+                // Sentence ends at the punctuation (inclusive) — the following
+                // space or CJK period is consumed by advancing sent_start_byte.
+                let punct_end = if sent_remaining.as_bytes()[pos] == 0xE3 {
+                    3 // CJK period "。" is 3 bytes, no trailing space
+                } else {
+                    1 // just the punctuation character
+                };
+                let sentence_end = pos + punct_end;
+                let delimiter_len = if sent_remaining.as_bytes()[pos] == 0xE3 {
+                    3
+                } else {
+                    2 // punctuation + space
+                };
+                let sentence = &sent_remaining[..sentence_end];
                 let abs_start = base + sent_start_byte;
                 push_hard_chunks(sentence, abs_start, max_chars, segments);
 
-                // Advance past ". " (the space after the period).
-                sent_start_byte += pos + 2;
-                sent_remaining = &sent_remaining[pos + 2..];
+                sent_start_byte += pos + delimiter_len;
+                sent_remaining = &sent_remaining[pos + delimiter_len..];
             }
             None => {
                 // Last sentence fragment.

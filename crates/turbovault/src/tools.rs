@@ -479,8 +479,9 @@ impl ObsidianMcpServer {
         let embedder = self.get_or_init_embedder().await?;
         let dims = embedder.dimensions();
 
-        let index = VectorIndex::open_or_create(&vector_dir.join("hnsw.idx"), dims, &vc.index_quantization)
-            .map_err(|e| McpError::internal(format!("Failed to open vector index: {e}")))?;
+        let index =
+            VectorIndex::open_or_create(&vector_dir.join("hnsw.idx"), dims, &vc.index_quantization)
+                .map_err(|e| McpError::internal(format!("Failed to open vector index: {e}")))?;
 
         // Warn on model mismatch (stale index — user should call rebuild_vector_index)
         if let Ok(Some((stored_model, stored_dims))) = chunks.get_model_meta()
@@ -3429,6 +3430,30 @@ impl ObsidianMcpServer {
 
     // ─── SIMILARITY TOOLS ────────────────────────────────────────────
 
+    /// Helper for similarity-engine-based tools that follow the identical pattern:
+    /// get vault name → get engine → run query → build StandardResponse with count/duration.
+    async fn run_similarity_tool<T: serde::Serialize>(
+        &self,
+        tool_name: &str,
+        limit: Option<usize>,
+        next_steps: &[&str],
+        run: impl FnOnce(&SimilarityEngine, usize) -> Vec<T>,
+    ) -> McpResult<serde_json::Value> {
+        let start = std::time::Instant::now();
+        let vault_name = self.get_active_vault_name().await?;
+        let engine = self.get_similarity_engine().await?;
+        let results = run(&engine, limit.unwrap_or(10));
+        StandardResponse::new(
+            &vault_name,
+            tool_name,
+            serde_json::to_value(&results).map_err(|e| McpError::internal(e.to_string()))?,
+        )
+        .with_count(results.len())
+        .with_duration(start.elapsed().as_millis() as u64)
+        .with_next_steps(next_steps)
+        .to_json()
+    }
+
     #[tool(
         description = "Find notes semantically similar to a query using TF-IDF cosine similarity (finds conceptual matches beyond exact keyword overlap)",
         usage = "Use when keyword search returns too few results or you want conceptual similarity. Returns similarity scores (0-1) and shared terms for explainability. More sophisticated than keyword search",
@@ -3443,20 +3468,13 @@ impl ObsidianMcpServer {
         query: String,
         limit: Option<usize>,
     ) -> McpResult<serde_json::Value> {
-        let start = std::time::Instant::now();
-        let vault_name = self.get_active_vault_name().await?;
-        let engine = self.get_similarity_engine().await?;
-        let results = engine.semantic_search(&query, limit.unwrap_or(10));
-        let count = results.len();
-        StandardResponse::new(
-            &vault_name,
+        self.run_similarity_tool(
             "semantic_search",
-            serde_json::to_value(&results).map_err(|e| McpError::internal(e.to_string()))?,
+            limit,
+            &["read_note", "find_similar_notes", "advanced_search"],
+            |engine, limit| engine.semantic_search(&query, limit),
         )
-        .with_count(count)
-        .with_duration(start.elapsed().as_millis() as u64)
-        .with_next_steps(&["read_note", "find_similar_notes", "advanced_search"])
-        .to_json()
+        .await
     }
 
     #[tool(
@@ -3473,20 +3491,13 @@ impl ObsidianMcpServer {
         path: String,
         limit: Option<usize>,
     ) -> McpResult<serde_json::Value> {
-        let start = std::time::Instant::now();
-        let vault_name = self.get_active_vault_name().await?;
-        let engine = self.get_similarity_engine().await?;
-        let results = engine.find_similar_notes(&path, limit.unwrap_or(10));
-        let count = results.len();
-        StandardResponse::new(
-            &vault_name,
+        self.run_similarity_tool(
             "find_similar_notes",
-            serde_json::to_value(&results).map_err(|e| McpError::internal(e.to_string()))?,
+            limit,
+            &["read_note", "semantic_search", "get_backlinks"],
+            |engine, limit| engine.find_similar_notes(&path, limit),
         )
-        .with_count(count)
-        .with_duration(start.elapsed().as_millis() as u64)
-        .with_next_steps(&["read_note", "semantic_search", "get_backlinks"])
-        .to_json()
+        .await
     }
 
     // ─── DUPLICATE TOOLS ─────────────────────────────────────────────

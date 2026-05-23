@@ -1,4 +1,5 @@
 use crate::error::VectorError;
+use crate::require_feature;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -23,13 +24,7 @@ pub struct FastembedEngine {
 
 impl FastembedEngine {
     pub fn new(model_name: &str, cache_dir: Option<PathBuf>) -> Result<Self, VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = (model_name, cache_dir);
-            return Err(VectorError::Embedding(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Embedding, model_name, cache_dir);
 
         #[cfg(feature = "local")]
         {
@@ -64,20 +59,14 @@ impl FastembedEngine {
 #[async_trait::async_trait]
 impl EmbeddingEngine for FastembedEngine {
     async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, VectorError> {
-        #[cfg(not(feature = "local"))]
-        {
-            let _ = texts;
-            return Err(VectorError::Embedding(
-                "vector-search feature not compiled in".to_string(),
-            ));
-        }
+        require_feature!(Embedding, texts);
 
         #[cfg(feature = "local")]
         {
             let model = self.model.clone();
             let texts_owned: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
             let result = tokio::task::spawn_blocking(move || {
-                let mut guard = model.lock().unwrap();
+                let mut guard = model.lock().expect("FastembedEngine mutex poisoned");
                 guard.embed(texts_owned, Some(32))
             })
             .await

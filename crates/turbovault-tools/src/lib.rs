@@ -190,8 +190,6 @@ pub mod vault_lifecycle;
 pub mod sql_engine;
 
 #[cfg(feature = "vector-search")]
-pub mod vector_tools;
-
 pub use analysis_tools::{AnalysisTools, VaultStats};
 pub use audit_tools::AuditTools;
 pub use batch_tools::BatchTools;
@@ -215,6 +213,3 @@ pub use vault_lifecycle::VaultLifecycleTools;
 
 #[cfg(feature = "sql")]
 pub use sql_engine::FrontmatterSqlEngine;
-
-#[cfg(feature = "vector-search")]
-pub use vector_tools::VectorTools;

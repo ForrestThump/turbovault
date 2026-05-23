@@ -146,7 +146,8 @@ impl IndexBuilder {
                 }
 
                 // Single transaction: upsert file record + all chunk rows (optimization 1).
-                self.chunks.insert_chunks_tx(&rel_path, mtime, &file_hash, &chunk_batch)?;
+                self.chunks
+                    .insert_chunks_tx(&rel_path, mtime, &file_hash, &chunk_batch)?;
 
                 // HNSW upserts happen outside the DB transaction.
                 for (chunk, vector) in chunk_batch.iter().zip(embeddings.iter()) {
@@ -211,17 +212,20 @@ impl IndexBuilder {
             Err(e) => return Err(VectorError::Io(e)),
         };
 
-        // Fast path: mtime unchanged means content unchanged.
-        if let Some(stored_mtime) = self.chunks.get_file_mtime(&rel_path)?
-            && stored_mtime == mtime
-        {
-            return Ok(());
-        }
-
-        // Re-read and re-chunk.
+        // Re-read and compute content hash.
         let raw_content = tokio::fs::read_to_string(file_path).await?;
         let plain = to_plain_text(&raw_content);
         let file_hash = sha256_hex(plain.as_bytes());
+
+        // Fast path: content unchanged → just update mtime.
+        if let Some((stored_mtime, stored_hash)) = self.chunks.get_file_info(&rel_path)?
+            && stored_hash == file_hash
+        {
+            if stored_mtime != mtime {
+                self.chunks.upsert_file(&rel_path, mtime, &file_hash)?;
+            }
+            return Ok(());
+        }
 
         let ranges = chunk_text(&plain, self.chunk_max_chars, self.chunk_overlap_chars);
 
@@ -242,7 +246,10 @@ impl IndexBuilder {
         }
 
         let chunk_texts: Vec<&str> = ranges.iter().map(|(s, e)| &plain[*s..*e]).collect();
-        let new_hashes: Vec<String> = chunk_texts.iter().map(|t| sha256_hex(t.as_bytes())).collect();
+        let new_hashes: Vec<String> = chunk_texts
+            .iter()
+            .map(|t| sha256_hex(t.as_bytes()))
+            .collect();
 
         // Diff against stored chunks — lightweight query (optimization 3).
         let old_hashes = self.chunks.get_chunk_hashes_for_file(&rel_path)?;
@@ -309,8 +316,13 @@ impl IndexBuilder {
         }
 
         // Single transaction: delete stale + insert all chunks + update file record (optimization 1).
-        self.chunks
-            .update_file_chunks_tx(&rel_path, mtime, &file_hash, &ids_to_delete, &chunk_batch)?;
+        self.chunks.update_file_chunks_tx(
+            &rel_path,
+            mtime,
+            &file_hash,
+            &ids_to_delete,
+            &chunk_batch,
+        )?;
 
         // HNSW upserts for new chunks (outside the DB transaction).
         let mut embed_idx = 0;
@@ -337,7 +349,10 @@ impl IndexBuilder {
 ///
 /// Duplicate content (same hash appearing multiple times) is handled via a per-hash queue:
 /// each old ID is consumed at most once, preserving as many vectors as possible.
-fn diff_chunks(old_hashes: &[(u64, String)], new_hashes: &[String]) -> (Vec<Option<u64>>, Vec<u64>) {
+fn diff_chunks(
+    old_hashes: &[(u64, String)],
+    new_hashes: &[String],
+) -> (Vec<Option<u64>>, Vec<u64>) {
     let mut old_by_hash: HashMap<&str, VecDeque<u64>> = HashMap::new();
     for (id, hash) in old_hashes {
         old_by_hash.entry(hash.as_str()).or_default().push_back(*id);
@@ -345,7 +360,11 @@ fn diff_chunks(old_hashes: &[(u64, String)], new_hashes: &[String]) -> (Vec<Opti
 
     let reuse_ids: Vec<Option<u64>> = new_hashes
         .iter()
-        .map(|hash| old_by_hash.get_mut(hash.as_str()).and_then(|q| q.pop_front()))
+        .map(|hash| {
+            old_by_hash
+                .get_mut(hash.as_str())
+                .and_then(|q| q.pop_front())
+        })
         .collect();
 
     let ids_to_delete: Vec<u64> = old_by_hash.into_values().flatten().collect();
@@ -383,7 +402,10 @@ mod tests {
 
     #[test]
     fn diff_all_unchanged() {
-        let (reuse, delete) = diff_chunks(&old(&[(1, "a"), (2, "b"), (3, "c")]), &hashes(&["a", "b", "c"]));
+        let (reuse, delete) = diff_chunks(
+            &old(&[(1, "a"), (2, "b"), (3, "c")]),
+            &hashes(&["a", "b", "c"]),
+        );
         assert_eq!(reuse, vec![Some(1), Some(2), Some(3)]);
         assert!(delete.is_empty());
     }
@@ -391,7 +413,10 @@ mod tests {
     #[test]
     fn diff_one_chunk_changed() {
         // chunk index 1 changed from "b" to "b2"
-        let (reuse, mut delete) = diff_chunks(&old(&[(1, "a"), (2, "b"), (3, "c")]), &hashes(&["a", "b2", "c"]));
+        let (reuse, mut delete) = diff_chunks(
+            &old(&[(1, "a"), (2, "b"), (3, "c")]),
+            &hashes(&["a", "b2", "c"]),
+        );
         assert_eq!(reuse, vec![Some(1), None, Some(3)]);
         delete.sort_unstable();
         assert_eq!(delete, vec![2]);
@@ -408,7 +433,8 @@ mod tests {
     #[test]
     fn diff_paragraph_deleted() {
         // middle chunk removed
-        let (reuse, mut delete) = diff_chunks(&old(&[(1, "a"), (2, "b"), (3, "c")]), &hashes(&["a", "c"]));
+        let (reuse, mut delete) =
+            diff_chunks(&old(&[(1, "a"), (2, "b"), (3, "c")]), &hashes(&["a", "c"]));
         assert_eq!(reuse, vec![Some(1), Some(3)]);
         delete.sort_unstable();
         assert_eq!(delete, vec![2]);
@@ -438,7 +464,8 @@ mod tests {
     #[test]
     fn diff_duplicate_content_full_match() {
         // Two identical chunks in both old and new → both reused, nothing deleted.
-        let (reuse, delete) = diff_chunks(&old(&[(10, "dup"), (11, "dup")]), &hashes(&["dup", "dup"]));
+        let (reuse, delete) =
+            diff_chunks(&old(&[(10, "dup"), (11, "dup")]), &hashes(&["dup", "dup"]));
         assert_eq!(reuse.len(), 2);
         assert!(reuse.iter().all(|r| r.is_some()));
         assert!(delete.is_empty());
@@ -479,26 +506,27 @@ mod tests {
                     })
                     .collect())
             }
-            fn dimensions(&self) -> usize { self.dims }
-            fn model_name(&self) -> &str { "counting-test-embedder" }
+            fn dimensions(&self) -> usize {
+                self.dims
+            }
+            fn model_name(&self) -> &str {
+                "counting-test-embedder"
+            }
         }
 
         const DIMS: usize = 8;
 
-        fn setup(
-            db_dir: &TempDir,
-        ) -> (Arc<ChunkStore>, Arc<CountingEmbedder>, Arc<AtomicUsize>) {
-            let chunks =
-                Arc::new(ChunkStore::open(&db_dir.path().join("state.db")).unwrap());
+        fn setup(db_dir: &TempDir) -> (Arc<ChunkStore>, Arc<CountingEmbedder>, Arc<AtomicUsize>) {
+            let chunks = Arc::new(ChunkStore::open(&db_dir.path().join("state.db")).unwrap());
             let count = Arc::new(AtomicUsize::new(0));
-            let embedder = Arc::new(CountingEmbedder { count: count.clone(), dims: DIMS });
+            let embedder = Arc::new(CountingEmbedder {
+                count: count.clone(),
+                dims: DIMS,
+            });
             (chunks, embedder, count)
         }
 
-        fn make_builder(
-            embedder: Arc<CountingEmbedder>,
-            chunks: Arc<ChunkStore>,
-        ) -> IndexBuilder {
+        fn make_builder(embedder: Arc<CountingEmbedder>, chunks: Arc<ChunkStore>) -> IndexBuilder {
             // chunk_max_chars=30 fits each 26-27 char test sentence as exactly one chunk.
             // overlap=0 so adjacent chunks don't share content and won't be invalidated
             // by a neighbour's change.
@@ -506,12 +534,7 @@ mod tests {
         }
 
         fn open_index(db_dir: &TempDir) -> VectorIndex {
-            VectorIndex::open_or_create(
-                &db_dir.path().join("hnsw.idx"),
-                DIMS,
-                "f32",
-            )
-            .unwrap()
+            VectorIndex::open_or_create(&db_dir.path().join("hnsw.idx"), DIMS, "f32").unwrap()
         }
 
         /// Write `content` to `path` and wait long enough for the filesystem
@@ -528,14 +551,18 @@ mod tests {
         // to_plain_text joins blocks with "\n" (not "\n\n"), so paragraph breaks in
         // the source markdown collapse. Sentence-level splits are stable across that
         // transform and give us predictable chunk boundaries.
-        const S1: &str = "Alpha unique text here.";   // 23 chars
-        const S2: &str = "Beta unique text here.";    // 22 chars
-        const S3: &str = "Gamma unique text here.";   // 23 chars
+        const S1: &str = "Alpha unique text here."; // 23 chars
+        const S2: &str = "Beta unique text here."; // 22 chars
+        const S3: &str = "Gamma unique text here."; // 23 chars
         const S2_MOD: &str = "Beta changed text here."; // 23 chars — different hash from S2
-        const S4: &str = "Delta unique text here.";   // 23 chars — new sentence for append test
+        const S4: &str = "Delta unique text here."; // 23 chars — new sentence for append test
 
-        fn three_sentences() -> String { format!("{S1} {S2} {S3}") }
-        fn two_sentences()   -> String { format!("{S1} {S2}") }
+        fn three_sentences() -> String {
+            format!("{S1} {S2} {S3}")
+        }
+        fn two_sentences() -> String {
+            format!("{S1} {S2}")
+        }
 
         #[tokio::test]
         async fn initial_index_embeds_all_chunks() {
@@ -548,8 +575,15 @@ mod tests {
             let note = vault.path().join("note.md");
             write_and_wait(&note, &three_sentences()).await;
 
-            builder.update_file(&note, vault.path(), &mut index).await.unwrap();
-            assert_eq!(count.load(Ordering::SeqCst), 3, "should embed all 3 chunks on first index");
+            builder
+                .update_file(&note, vault.path(), &mut index)
+                .await
+                .unwrap();
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                3,
+                "should embed all 3 chunks on first index"
+            );
         }
 
         #[tokio::test]
@@ -562,11 +596,17 @@ mod tests {
 
             let note = vault.path().join("note.md");
             write_and_wait(&note, &two_sentences()).await;
-            builder.update_file(&note, vault.path(), &mut index).await.unwrap();
+            builder
+                .update_file(&note, vault.path(), &mut index)
+                .await
+                .unwrap();
             let after_first = count.load(Ordering::SeqCst);
 
             // Second call with identical mtime → early exit, zero embedding.
-            builder.update_file(&note, vault.path(), &mut index).await.unwrap();
+            builder
+                .update_file(&note, vault.path(), &mut index)
+                .await
+                .unwrap();
             assert_eq!(
                 count.load(Ordering::SeqCst),
                 after_first,
@@ -574,8 +614,12 @@ mod tests {
             );
         }
 
-        #[tokio::test]
-        async fn one_sentence_changed_reembeds_only_that_chunk() {
+        async fn check_incremental_update(
+            initial_content: &str,
+            updated_content: &str,
+            expected_count: usize,
+            msg: &str,
+        ) {
             let vault = TempDir::new().unwrap();
             let db_dir = TempDir::new().unwrap();
             let (chunks, embedder, count) = setup(&db_dir);
@@ -583,41 +627,41 @@ mod tests {
             let mut index = open_index(&db_dir);
 
             let note = vault.path().join("note.md");
-            write_and_wait(&note, &three_sentences()).await;
-            builder.update_file(&note, vault.path(), &mut index).await.unwrap();
+            write_and_wait(&note, initial_content).await;
+            builder
+                .update_file(&note, vault.path(), &mut index)
+                .await
+                .unwrap();
             assert_eq!(count.load(Ordering::SeqCst), 3);
 
-            // Replace only the middle sentence; S1 and S3 are unchanged.
-            write_and_wait(&note, &format!("{S1} {S2_MOD} {S3}")).await;
-            builder.update_file(&note, vault.path(), &mut index).await.unwrap();
-            assert_eq!(
-                count.load(Ordering::SeqCst),
+            write_and_wait(&note, updated_content).await;
+            builder
+                .update_file(&note, vault.path(), &mut index)
+                .await
+                .unwrap();
+            assert_eq!(count.load(Ordering::SeqCst), expected_count, "{msg}");
+        }
+
+        #[tokio::test]
+        async fn one_sentence_changed_reembeds_only_that_chunk() {
+            check_incremental_update(
+                &three_sentences(),
+                &format!("{S1} {S2_MOD} {S3}"),
                 4,
-                "only the changed sentence-chunk should be re-embedded"
-            );
+                "only the changed sentence-chunk should be re-embedded",
+            )
+            .await;
         }
 
         #[tokio::test]
         async fn appended_sentence_embeds_only_new_chunk() {
-            let vault = TempDir::new().unwrap();
-            let db_dir = TempDir::new().unwrap();
-            let (chunks, embedder, count) = setup(&db_dir);
-            let builder = make_builder(embedder, chunks);
-            let mut index = open_index(&db_dir);
-
-            let note = vault.path().join("note.md");
-            write_and_wait(&note, &three_sentences()).await;
-            builder.update_file(&note, vault.path(), &mut index).await.unwrap();
-            assert_eq!(count.load(Ordering::SeqCst), 3);
-
-            // Append a fourth sentence; first three are unchanged.
-            write_and_wait(&note, &format!("{S1} {S2} {S3} {S4}")).await;
-            builder.update_file(&note, vault.path(), &mut index).await.unwrap();
-            assert_eq!(
-                count.load(Ordering::SeqCst),
+            check_incremental_update(
+                &three_sentences(),
+                &format!("{S1} {S2} {S3} {S4}"),
                 4,
-                "only the new appended chunk should be embedded"
-            );
+                "only the new appended chunk should be embedded",
+            )
+            .await;
         }
 
         #[tokio::test]
@@ -630,15 +674,31 @@ mod tests {
 
             let note = vault.path().join("note.md");
             write_and_wait(&note, &two_sentences()).await;
-            builder.update_file(&note, vault.path(), &mut index).await.unwrap();
-            assert!(index.len() > 0, "index should have entries after initial index");
+            builder
+                .update_file(&note, vault.path(), &mut index)
+                .await
+                .unwrap();
+            assert!(
+                index.len() > 0,
+                "index should have entries after initial index"
+            );
 
             tokio::fs::remove_file(&note).await.unwrap();
-            builder.update_file(&note, vault.path(), &mut index).await.unwrap();
-            assert_eq!(index.len(), 0, "deleted file: all vectors should be removed");
+            builder
+                .update_file(&note, vault.path(), &mut index)
+                .await
+                .unwrap();
+            assert_eq!(
+                index.len(),
+                0,
+                "deleted file: all vectors should be removed"
+            );
 
             let stored = chunks.get_chunks_for_file("note.md").unwrap();
-            assert!(stored.is_empty(), "deleted file: chunk records should be removed from DB");
+            assert!(
+                stored.is_empty(),
+                "deleted file: chunk records should be removed from DB"
+            );
         }
 
         #[tokio::test]
@@ -651,13 +711,19 @@ mod tests {
 
             let note = vault.path().join("note.md");
             write_and_wait(&note, &two_sentences()).await;
-            builder.update_file(&note, vault.path(), &mut index).await.unwrap();
+            builder
+                .update_file(&note, vault.path(), &mut index)
+                .await
+                .unwrap();
             let initial = count.load(Ordering::SeqCst);
             assert!(initial > 0);
 
             // Completely different content — no hash should match.
             write_and_wait(&note, "Rewritten first thing. Rewritten second thing.").await;
-            builder.update_file(&note, vault.path(), &mut index).await.unwrap();
+            builder
+                .update_file(&note, vault.path(), &mut index)
+                .await
+                .unwrap();
             let after = count.load(Ordering::SeqCst);
             assert_eq!(
                 after - initial,
