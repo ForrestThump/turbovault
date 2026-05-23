@@ -34,6 +34,8 @@ pub struct SearchRouter {
     chunks: Arc<ChunkStore>,
     rrf_k: f64,
     bm25_weight: f32,
+    overfetch_factor: usize,
+    min_similarity: f32,
 }
 
 impl SearchRouter {
@@ -43,6 +45,8 @@ impl SearchRouter {
         chunks: Arc<ChunkStore>,
         rrf_k: f64,
         bm25_weight: f32,
+        overfetch_factor: usize,
+        min_similarity: f32,
     ) -> Self {
         Self {
             vector,
@@ -50,6 +54,8 @@ impl SearchRouter {
             chunks,
             rrf_k,
             bm25_weight,
+            overfetch_factor,
+            min_similarity,
         }
     }
 
@@ -65,8 +71,13 @@ impl SearchRouter {
 
         // Search the HNSW index (over-fetch to allow dedup by note)
         let index = self.vector.read().await;
-        let raw = index.search(&query_vec, limit * 3)?;
+        let raw = index.search(&query_vec, limit * self.overfetch_factor)?;
         drop(index);
+
+        let raw: Vec<(u64, f32)> = raw
+            .into_iter()
+            .filter(|(_, score)| *score >= self.min_similarity)
+            .collect();
 
         // Deduplicate by note_path keeping best score per note.
         // Results are sorted by score descending, so the first chunk seen
@@ -119,7 +130,11 @@ impl SearchRouter {
         let query_vec = embeddings.remove(0);
 
         let index = self.vector.read().await;
-        let raw = index.search(&query_vec, limit * 3)?;
+        let raw: Vec<(u64, f32)> = index
+            .search(&query_vec, limit * self.overfetch_factor)?
+            .into_iter()
+            .filter(|(_, score)| *score >= self.min_similarity)
+            .collect();
         drop(index);
 
         // Build BM25 rank map: note_path -> 0-based rank

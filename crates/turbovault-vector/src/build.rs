@@ -55,7 +55,6 @@ impl IndexBuilder {
 
         self.chunks.clear_all()?;
 
-        // Collect all .md files
         let md_files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(vault_root)
             .into_iter()
             .filter_map(|e| e.ok())
@@ -70,98 +69,98 @@ impl IndexBuilder {
         let mut notes_indexed = 0usize;
         let mut chunks_created = 0usize;
 
-        // Process in batches of 32 files
-        for batch in md_files.chunks(32) {
-            for file_path in batch {
-                let raw_content = match tokio::fs::read_to_string(&file_path).await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        warn!("Failed to read {}: {}", file_path.display(), e);
-                        continue;
-                    }
-                };
+        // (rel_path, mtime, file_hash, chunks)
+        let mut pending: Vec<(String, i64, String, Vec<Chunk>)> = Vec::new();
+        let mut pending_texts: Vec<String> = Vec::new();
 
-                let mtime = match std::fs::metadata(file_path)
-                    .and_then(|m| m.modified())
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).map_err(std::io::Error::other))
-                {
-                    Ok(d) => d.as_millis() as i64,
-                    Err(e) => {
-                        warn!("Failed to get mtime for {}: {}", file_path.display(), e);
-                        0
-                    }
-                };
-
-                let plain = to_plain_text(&raw_content);
-                let file_hash = sha256_hex(plain.as_bytes());
-
-                let rel_path = file_path
-                    .strip_prefix(vault_root)
-                    .unwrap_or(file_path)
-                    .to_string_lossy()
-                    .to_string();
-
-                let ranges = chunk_text(&plain, self.chunk_max_chars, self.chunk_overlap_chars);
-                if ranges.is_empty() {
-                    // Empty file: record it so incremental updates work, but no chunks.
-                    self.chunks.upsert_file(&rel_path, mtime, &file_hash)?;
-                    notes_indexed += 1;
+        for file_path in &md_files {
+            let raw_content = match tokio::fs::read_to_string(file_path).await {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("Failed to read {}: {}", file_path.display(), e);
                     continue;
                 }
+            };
 
-                // Collect chunk texts for this file
-                let chunk_texts: Vec<&str> = ranges
-                    .iter()
-                    .map(|(start, end)| &plain[*start..*end])
-                    .collect();
-
-                // Embed all chunks for this file in one call
-                let embeddings = match self.embedder.embed(&chunk_texts).await {
-                    Ok(e) => e,
-                    Err(e) => {
-                        warn!("Failed to embed chunks for {}: {}", rel_path, e);
-                        notes_indexed += 1;
-                        continue;
-                    }
-                };
-
-                // Allocate IDs for this file's chunks with a single DB read (optimization 2).
-                let mut chunk_id = self.chunks.next_chunk_id()?;
-                let total_chunks = ranges.len() as u32;
-                let mut chunk_batch: Vec<Chunk> = Vec::with_capacity(ranges.len());
-
-                for (chunk_index, (start, end)) in ranges.iter().enumerate() {
-                    let chunk_text_slice = &plain[*start..*end];
-                    chunk_batch.push(Chunk {
-                        id: chunk_id,
-                        note_path: rel_path.clone(),
-                        chunk_index: chunk_index as u32,
-                        total_chunks,
-                        start_byte: *start as u64,
-                        end_byte: *end as u64,
-                        content_hash: sha256_hex(chunk_text_slice.as_bytes()),
-                        preview: chunk_text_slice.chars().take(120).collect(),
-                    });
-                    chunk_id += 1;
+            let mtime = match std::fs::metadata(file_path)
+                .and_then(|m| m.modified())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).map_err(std::io::Error::other))
+            {
+                Ok(d) => d.as_millis() as i64,
+                Err(e) => {
+                    warn!("Failed to get mtime for {}: {}", file_path.display(), e);
+                    0
                 }
+            };
 
-                // Single transaction: upsert file record + all chunk rows (optimization 1).
-                self.chunks
-                    .insert_chunks_tx(&rel_path, mtime, &file_hash, &chunk_batch)?;
+            let plain = to_plain_text(&raw_content);
+            let file_hash = sha256_hex(plain.as_bytes());
 
-                // HNSW upserts happen outside the DB transaction.
-                for (chunk, vector) in chunk_batch.iter().zip(embeddings.iter()) {
-                    index.upsert(chunk.id, vector)?;
-                }
-                chunks_created += chunk_batch.len();
+            let rel_path = file_path
+                .strip_prefix(vault_root)
+                .unwrap_or(file_path)
+                .to_string_lossy()
+                .to_string();
 
+            let ranges = chunk_text(&plain, self.chunk_max_chars, self.chunk_overlap_chars);
+            if ranges.is_empty() {
+                // Empty file: record it so incremental updates work, but no chunks.
+                self.chunks.upsert_file(&rel_path, mtime, &file_hash)?;
                 notes_indexed += 1;
+                continue;
+            }
 
-                if notes_indexed.is_multiple_of(100) {
+            let mut chunk_id = self.chunks.allocate_chunk_ids(ranges.len() as u64)?;
+            let total_chunks = ranges.len() as u32;
+            let mut chunk_batch: Vec<Chunk> = Vec::with_capacity(ranges.len());
+
+            for (chunk_index, (start, end)) in ranges.iter().enumerate() {
+                let chunk_text_slice = &plain[*start..*end];
+                pending_texts.push(chunk_text_slice.to_string());
+                chunk_batch.push(Chunk {
+                    id: chunk_id,
+                    note_path: rel_path.clone(),
+                    chunk_index: chunk_index as u32,
+                    total_chunks,
+                    start_byte: *start as u64,
+                    end_byte: *end as u64,
+                    content_hash: sha256_hex(chunk_text_slice.as_bytes()),
+                    preview: chunk_text_slice.chars().take(120).collect(),
+                });
+                chunk_id += 1;
+            }
+
+            pending.push((rel_path, mtime, file_hash, chunk_batch));
+
+            if pending_texts.len() >= EMBED_BATCH_SIZE {
+                flush_embed_batch(
+                    self.embedder.as_ref(),
+                    &self.chunks,
+                    index,
+                    &mut pending,
+                    &mut pending_texts,
+                    &mut chunks_created,
+                    &mut notes_indexed,
+                )
+                .await?;
+
+                if notes_indexed > 0 && notes_indexed.is_multiple_of(100) {
                     info!("Indexed {}/{} files", notes_indexed, total);
                 }
             }
         }
+
+        // Flush any remaining files.
+        flush_embed_batch(
+            self.embedder.as_ref(),
+            &self.chunks,
+            index,
+            &mut pending,
+            &mut pending_texts,
+            &mut chunks_created,
+            &mut notes_indexed,
+        )
+        .await?;
 
         index.flush()?;
 
@@ -251,7 +250,6 @@ impl IndexBuilder {
             .map(|t| sha256_hex(t.as_bytes()))
             .collect();
 
-        // Diff against stored chunks — lightweight query (optimization 3).
         let old_hashes = self.chunks.get_chunk_hashes_for_file(&rel_path)?;
         let (reuse_ids, ids_to_delete) = diff_chunks(&old_hashes, &new_hashes);
 
@@ -276,10 +274,9 @@ impl IndexBuilder {
             self.embedder.embed(&texts).await?
         };
 
-        // Allocate IDs for new chunks with a single DB read (optimization 2).
         let new_count = embed_positions.len();
         let mut next_id = if new_count > 0 {
-            self.chunks.next_chunk_id()?
+            self.chunks.allocate_chunk_ids(new_count as u64)?
         } else {
             0
         };
@@ -315,7 +312,6 @@ impl IndexBuilder {
             });
         }
 
-        // Single transaction: delete stale + insert all chunks + update file record (optimization 1).
         self.chunks.update_file_chunks_tx(
             &rel_path,
             mtime,
@@ -338,6 +334,59 @@ impl IndexBuilder {
         }
         Ok(())
     }
+}
+
+/// Number of chunk texts to accumulate across files before calling the embedder.
+/// Amortises `spawn_blocking` and model-lock overhead across file boundaries so
+/// that the ONNX batch dimension is well-saturated even for small per-file chunk counts.
+const EMBED_BATCH_SIZE: usize = 64;
+
+/// Embed all pending chunk texts, store them in the DB and HNSW index, then clear the buffers.
+/// On embed failure, all files in the batch are skipped with a warning.
+async fn flush_embed_batch(
+    embedder: &dyn EmbeddingEngine,
+    chunks: &ChunkStore,
+    index: &mut VectorIndex,
+    pending: &mut Vec<(String, i64, String, Vec<Chunk>)>,
+    pending_texts: &mut Vec<String>,
+    chunks_created: &mut usize,
+    notes_indexed: &mut usize,
+) -> Result<(), VectorError> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let refs: Vec<&str> = pending_texts.iter().map(|s| s.as_str()).collect();
+    let embeddings = match embedder.embed(&refs).await {
+        Ok(e) => e,
+        Err(e) => {
+            warn!("Failed to embed batch of {} files: {}", pending.len(), e);
+            *notes_indexed += pending.len();
+            pending.clear();
+            pending_texts.clear();
+            return Ok(());
+        }
+    };
+
+    let mut emb_idx = 0;
+    for (rel_path, mtime, file_hash, chunk_batch) in pending.drain(..) {
+        let n = chunk_batch.len();
+        if let Err(e) = chunks.insert_chunks_tx(&rel_path, mtime, &file_hash, &chunk_batch) {
+            warn!("Failed to store chunks for {}: {}", rel_path, e);
+            emb_idx += n;
+            *notes_indexed += 1;
+            continue;
+        }
+        for (chunk, vector) in chunk_batch.iter().zip(embeddings[emb_idx..emb_idx + n].iter()) {
+            index.upsert(chunk.id, vector)?;
+        }
+        *chunks_created += n;
+        *notes_indexed += 1;
+        emb_idx += n;
+    }
+
+    pending_texts.clear();
+    Ok(())
 }
 
 /// Match new chunk hashes against stored chunks by content hash.
@@ -476,7 +525,7 @@ mod tests {
     #[cfg(feature = "local")]
     mod integration {
         use super::super::*;
-        use crate::{ChunkStore, VectorIndex};
+        use crate::{ChunkStore, EmbeddingEngine, SearchRouter, VectorIndex};
         use std::sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -494,12 +543,14 @@ mod tests {
         #[async_trait::async_trait]
         impl EmbeddingEngine for CountingEmbedder {
             async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, VectorError> {
-                self.count.fetch_add(texts.len(), Ordering::SeqCst);
-                // Deterministic non-zero unit-ish vectors (avoids zero-norm issues).
+                // Use the global count as the vector index so each text gets a
+                // unique unit vector, even across multiple embed() calls.
+                // Duplicate vectors across calls would cause usearch to silently
+                // drop the second add, making index.len() disagree with chunks_created.
                 Ok(texts
                     .iter()
-                    .enumerate()
-                    .map(|(i, _)| {
+                    .map(|_| {
+                        let i = self.count.fetch_add(1, Ordering::SeqCst);
                         let mut v = vec![0.0f32; self.dims];
                         v[i % self.dims] = 1.0;
                         v
@@ -729,6 +780,268 @@ mod tests {
                 after - initial,
                 initial,
                 "full rewrite: must re-embed every chunk (none reused)"
+            );
+        }
+
+        #[tokio::test]
+        async fn full_rebuild_indexes_all_files() {
+            let vault = TempDir::new().unwrap();
+            let db_dir = TempDir::new().unwrap();
+            let (chunks, embedder, count) = setup(&db_dir);
+            let builder = make_builder(embedder, chunks.clone());
+            let mut index = open_index(&db_dir);
+
+            write_and_wait(&vault.path().join("a.md"), &three_sentences()).await;
+            write_and_wait(&vault.path().join("b.md"), &two_sentences()).await;
+
+            let stats = builder
+                .full_rebuild(vault.path(), &mut index)
+                .await
+                .unwrap();
+
+            assert_eq!(stats.notes_indexed, 2);
+            assert!(stats.chunks_created > 0, "expected chunks from at least one file");
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                stats.chunks_created,
+                "embed count must equal chunks_created"
+            );
+            // Verify DB state: both files present with their chunks.
+            let a_chunks = chunks.get_chunks_for_file("a.md").unwrap();
+            let b_chunks = chunks.get_chunks_for_file("b.md").unwrap();
+            assert!(!a_chunks.is_empty(), "a.md must have chunks in DB");
+            assert!(!b_chunks.is_empty(), "b.md must have chunks in DB");
+            assert_eq!(
+                a_chunks.len() + b_chunks.len(),
+                stats.chunks_created,
+                "DB chunk count must equal chunks_created"
+            );
+        }
+
+        #[tokio::test]
+        async fn full_rebuild_twice_resets_and_reindexes() {
+            let vault = TempDir::new().unwrap();
+            let db_dir = TempDir::new().unwrap();
+            let (chunks, embedder, count) = setup(&db_dir);
+            let builder = make_builder(embedder, chunks);
+            let mut index = open_index(&db_dir);
+
+            write_and_wait(&vault.path().join("note.md"), &three_sentences()).await;
+
+            builder
+                .full_rebuild(vault.path(), &mut index)
+                .await
+                .unwrap();
+            let after_first = count.load(Ordering::SeqCst);
+            assert!(after_first > 0);
+
+            // Second rebuild clears the DB and re-indexes from scratch.
+            builder
+                .full_rebuild(vault.path(), &mut index)
+                .await
+                .unwrap();
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                after_first * 2,
+                "second full_rebuild must re-embed all chunks"
+            );
+        }
+
+        #[tokio::test]
+        async fn file_emptied_removes_chunks_from_index() {
+            let vault = TempDir::new().unwrap();
+            let db_dir = TempDir::new().unwrap();
+            let (chunks, embedder, count) = setup(&db_dir);
+            let builder = make_builder(embedder, chunks.clone());
+            let mut index = open_index(&db_dir);
+
+            let note = vault.path().join("note.md");
+            write_and_wait(&note, &two_sentences()).await;
+            builder
+                .update_file(&note, vault.path(), &mut index)
+                .await
+                .unwrap();
+            let initial_count = count.load(Ordering::SeqCst);
+            assert!(initial_count > 0);
+
+            // Overwrite with empty content.
+            write_and_wait(&note, "").await;
+            builder
+                .update_file(&note, vault.path(), &mut index)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                initial_count,
+                "empty file must not trigger re-embedding"
+            );
+            assert_eq!(index.len(), 0, "empty file: all vectors must be removed");
+            assert!(
+                chunks.get_chunks_for_file("note.md").unwrap().is_empty(),
+                "empty file: chunk DB records must be removed"
+            );
+            assert!(
+                chunks.get_file_mtime("note.md").unwrap().is_some(),
+                "empty file: file record must be preserved for future tracking"
+            );
+        }
+
+        #[tokio::test]
+        async fn mtime_changed_content_same_updates_mtime_without_reembedding() {
+            let vault = TempDir::new().unwrap();
+            let db_dir = TempDir::new().unwrap();
+            let (chunks, embedder, count) = setup(&db_dir);
+            let builder = make_builder(embedder, chunks.clone());
+            let mut index = open_index(&db_dir);
+
+            let note = vault.path().join("note.md");
+            write_and_wait(&note, &two_sentences()).await;
+            builder
+                .update_file(&note, vault.path(), &mut index)
+                .await
+                .unwrap();
+            let embed_count = count.load(Ordering::SeqCst);
+            let old_mtime = chunks.get_file_mtime("note.md").unwrap().unwrap();
+
+            // Rewrite identical content — mtime advances, hash stays the same.
+            write_and_wait(&note, &two_sentences()).await;
+            builder
+                .update_file(&note, vault.path(), &mut index)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                embed_count,
+                "same content: must not re-embed on mtime-only change"
+            );
+            let new_mtime = chunks.get_file_mtime("note.md").unwrap().unwrap();
+            assert!(new_mtime > old_mtime, "mtime must be updated in the DB");
+        }
+
+        // ── full_rebuild batch-boundary test ─────────────────────────────────
+
+        #[tokio::test]
+        async fn full_rebuild_spans_multiple_embed_batches() {
+            // 22 files × 3 chunks each = 66 chunks, which exceeds EMBED_BATCH_SIZE
+            // (64). This forces the mid-loop flush path inside full_rebuild, verifying
+            // that cross-batch ID allocation and chunk storage both work correctly.
+            let vault = TempDir::new().unwrap();
+            let db_dir = TempDir::new().unwrap();
+            let (chunks, embedder, count) = setup(&db_dir);
+            let builder = make_builder(Arc::clone(&embedder), Arc::clone(&chunks));
+            let mut index = open_index(&db_dir);
+
+            const N_FILES: usize = 22;
+            for i in 0..N_FILES {
+                tokio::fs::write(vault.path().join(format!("note{i}.md")), three_sentences())
+                    .await
+                    .unwrap();
+            }
+
+            let stats = builder
+                .full_rebuild(vault.path(), &mut index)
+                .await
+                .unwrap();
+
+            assert_eq!(stats.notes_indexed, N_FILES);
+            assert_eq!(stats.chunks_created, N_FILES * 3);
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                N_FILES * 3,
+                "embed count must equal total chunks across all batches"
+            );
+            for i in 0..N_FILES {
+                let file_chunks = chunks
+                    .get_chunks_for_file(&format!("note{i}.md"))
+                    .unwrap();
+                assert_eq!(file_chunks.len(), 3, "note{i}.md must have 3 chunks in DB");
+            }
+        }
+
+        // ── SearchRouter: min_similarity and overfetch_factor ─────────────────
+
+        #[tokio::test]
+        async fn min_similarity_filters_below_threshold() {
+            let vault = TempDir::new().unwrap();
+            let db_dir = TempDir::new().unwrap();
+            let (chunks, embedder, _count) = setup(&db_dir);
+            let builder = make_builder(Arc::clone(&embedder), Arc::clone(&chunks));
+            let index = Arc::new(tokio::sync::RwLock::new(open_index(&db_dir)));
+
+            let note = vault.path().join("note.md");
+            write_and_wait(&note, &two_sentences()).await;
+            builder
+                .update_file(&note, vault.path(), &mut *index.write().await)
+                .await
+                .unwrap();
+
+            // CountingEmbedder emits orthogonal unit vectors for each embed() call.
+            // After indexing 2 chunks (positions 0,1), the query gets position 2 —
+            // orthogonal to all stored vectors → cosine similarity = 0 → score = 0.0.
+            let make_router = |min_sim: f32| {
+                SearchRouter::new(
+                    Arc::clone(&index),
+                    Arc::clone(&embedder) as Arc<dyn EmbeddingEngine>,
+                    Arc::clone(&chunks),
+                    60.0,
+                    0.3,
+                    5,
+                    min_sim,
+                )
+            };
+
+            // min_similarity = 0.0: score 0.0 ≥ 0.0 → results pass through.
+            let results_zero = make_router(0.0).vector_only("query", 5).await.unwrap();
+            assert!(
+                !results_zero.is_empty(),
+                "min_similarity=0.0 must not filter results with score=0.0"
+            );
+
+            // min_similarity = 0.1: score 0.0 < 0.1 → all results filtered out.
+            let results_filtered = make_router(0.1).vector_only("query", 5).await.unwrap();
+            assert!(
+                results_filtered.is_empty(),
+                "min_similarity=0.1 must filter out all results with score=0.0"
+            );
+        }
+
+        #[tokio::test]
+        async fn overfetch_factor_result_count_does_not_exceed_limit() {
+            // Verifies that result count is bounded by `limit` regardless of
+            // overfetch_factor and that the setting doesn't cause errors.
+            let vault = TempDir::new().unwrap();
+            let db_dir = TempDir::new().unwrap();
+            let (chunks, embedder, _count) = setup(&db_dir);
+            let builder = make_builder(Arc::clone(&embedder), Arc::clone(&chunks));
+            let index = Arc::new(tokio::sync::RwLock::new(open_index(&db_dir)));
+
+            for i in 0..5u32 {
+                let note = vault.path().join(format!("note{i}.md"));
+                tokio::fs::write(&note, format!("Unique content sentence {i}."))
+                    .await
+                    .unwrap();
+                builder
+                    .update_file(&note, vault.path(), &mut *index.write().await)
+                    .await
+                    .unwrap();
+            }
+
+            let router = SearchRouter::new(
+                index,
+                embedder as Arc<dyn EmbeddingEngine>,
+                chunks,
+                60.0,
+                0.3,
+                10, // large overfetch — should not cause a panic or extra results
+                0.0,
+            );
+
+            let results = router.vector_only("query", 3).await.unwrap();
+            assert!(
+                results.len() <= 3,
+                "result count must not exceed limit regardless of overfetch_factor"
             );
         }
     }

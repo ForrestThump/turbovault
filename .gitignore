@@ -32,3 +32,6 @@ htmlcov/
 !PUBLISH*.md
 !/LICENSE*
 !LICENSE
+
+# Embedding model cache
+crates/turbovault/.fastembed_cache

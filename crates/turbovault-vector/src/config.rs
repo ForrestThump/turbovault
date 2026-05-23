@@ -12,6 +12,8 @@ pub struct VectorConfig {
     pub incremental_granularity: String,
     pub model_cache_dir: Option<std::path::PathBuf>,
     pub index_quantization: String,
+    pub search_overfetch_factor: usize,
+    pub min_similarity: f32,
 }
 
 impl From<&VectorSearchConfig> for VectorConfig {
@@ -30,6 +32,8 @@ impl From<&VectorSearchConfig> for VectorConfig {
                 Some(std::path::PathBuf::from(&c.model_cache_dir))
             },
             index_quantization: c.index_quantization.clone(),
+            search_overfetch_factor: c.search_overfetch_factor,
+            min_similarity: c.min_similarity,
         }
     }
 }

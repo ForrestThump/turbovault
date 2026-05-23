@@ -500,6 +500,8 @@ impl ObsidianMcpServer {
             chunks.clone(),
             vc.rrf_k,
             vc.bm25_weight,
+            vc.search_overfetch_factor,
+            vc.min_similarity,
         ));
 
         let state = Arc::new(VaultVectorState {

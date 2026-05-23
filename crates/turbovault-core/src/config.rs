@@ -160,6 +160,13 @@ pub struct VectorSearchConfig {
     /// default — halves index RAM with negligible quality loss on unit-norm embeddings), "i8"
     /// (int8, ~4× smaller, minor quality trade-off).
     pub index_quantization: String,
+    /// Multiplier applied to the result limit when fetching raw vector candidates before
+    /// deduplication by note. Higher values improve recall at the cost of more SQLite lookups.
+    pub search_overfetch_factor: usize,
+    /// Minimum cosine similarity (0.0–1.0) required to include a vector result.
+    /// Score = 1.0 − cosine_distance; results below this threshold are discarded before
+    /// RRF fusion and note deduplication.
+    pub min_similarity: f32,
 }
 
 impl Default for VectorSearchConfig {
@@ -175,6 +182,8 @@ impl Default for VectorSearchConfig {
             incremental_granularity: "paragraph".to_string(),
             model_cache_dir: String::new(),
             index_quantization: "f16".to_string(),
+            search_overfetch_factor: 5,
+            min_similarity: 0.3,
         }
     }
 }

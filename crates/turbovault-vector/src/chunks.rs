@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 #[cfg(feature = "local")]
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, Row, params};
 
 /// A single indexed chunk.
 #[derive(Debug, Clone)]
@@ -55,6 +55,31 @@ const INSERT_CHUNK_SQL: &str = "INSERT OR REPLACE INTO chunks \
 #[cfg(feature = "local")]
 const UPSERT_FILE_SQL: &str =
     "INSERT OR REPLACE INTO files (path, mtime, content_hash) VALUES (?1, ?2, ?3)";
+
+#[cfg(feature = "local")]
+fn row_to_chunk(row: &Row<'_>) -> rusqlite::Result<Chunk> {
+    Ok(Chunk {
+        id: row.get::<_, i64>(0)? as u64,
+        note_path: row.get::<_, String>(1)?,
+        chunk_index: row.get::<_, i64>(2)? as u32,
+        total_chunks: row.get::<_, i64>(3)? as u32,
+        start_byte: row.get::<_, i64>(4)? as u64,
+        end_byte: row.get::<_, i64>(5)? as u64,
+        content_hash: row.get::<_, String>(6)?,
+        preview: row.get::<_, String>(7)?,
+    })
+}
+
+#[cfg(feature = "local")]
+fn chunk_delete_in_sql(ids: &[u64]) -> (String, Vec<i64>) {
+    let placeholders: String = std::iter::repeat_n("?", ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    (
+        format!("DELETE FROM chunks WHERE id IN ({placeholders})"),
+        ids.iter().map(|&id| id as i64).collect(),
+    )
+}
 
 /// SQLite-backed store mapping chunk IDs <-> notes + paragraph hashes.
 pub struct ChunkStore {
@@ -107,26 +132,10 @@ impl ChunkStore {
                 )
                 .map_err(|e| VectorError::Database(e.to_string()))?;
 
-            let rows = stmt
-                .query_map(params![path], |row| {
-                    Ok(Chunk {
-                        id: row.get::<_, i64>(0)? as u64,
-                        note_path: row.get::<_, String>(1)?,
-                        chunk_index: row.get::<_, i64>(2)? as u32,
-                        total_chunks: row.get::<_, i64>(3)? as u32,
-                        start_byte: row.get::<_, i64>(4)? as u64,
-                        end_byte: row.get::<_, i64>(5)? as u64,
-                        content_hash: row.get::<_, String>(6)?,
-                        preview: row.get::<_, String>(7)?,
-                    })
-                })
-                .map_err(|e| VectorError::Database(e.to_string()))?;
-
-            let mut chunks = Vec::new();
-            for row in rows {
-                chunks.push(row.map_err(|e| VectorError::Database(e.to_string()))?);
-            }
-            Ok(chunks)
+            stmt.query_map(params![path], row_to_chunk)
+                .map_err(|e| VectorError::Database(e.to_string()))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| VectorError::Database(e.to_string()))
         }
     }
 
@@ -272,7 +281,10 @@ impl ChunkStore {
         {
             let conn = self.conn.lock().expect("ChunkStore mutex poisoned");
             conn.execute_batch(
-                "DELETE FROM chunks; DELETE FROM paragraphs; DELETE FROM files; DELETE FROM meta;",
+                "DELETE FROM chunks; \
+                 DELETE FROM files; \
+                 DELETE FROM meta WHERE key != 'max_chunk_id'; \
+                 UPDATE meta SET value = '0' WHERE key = 'max_chunk_id';",
             )
             .map_err(|e| VectorError::Database(e.to_string()))?;
             Ok(())
@@ -293,17 +305,12 @@ impl ChunkStore {
                 )
                 .map_err(|e| VectorError::Database(e.to_string()))?;
 
-            let rows = stmt
-                .query_map(params![path], |row| {
-                    Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?))
-                })
-                .map_err(|e| VectorError::Database(e.to_string()))?;
-
-            let mut result = Vec::new();
-            for row in rows {
-                result.push(row.map_err(|e| VectorError::Database(e.to_string()))?);
-            }
-            Ok(result)
+            stmt.query_map(params![path], |row| {
+                Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| VectorError::Database(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| VectorError::Database(e.to_string()))
         }
     }
 
@@ -377,11 +384,7 @@ impl ChunkStore {
                 .map_err(|e| VectorError::Database(e.to_string()))?;
 
             if !delete_ids.is_empty() {
-                let placeholders: String = std::iter::repeat_n("?", delete_ids.len())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let sql = format!("DELETE FROM chunks WHERE id IN ({placeholders})");
-                let params: Vec<i64> = delete_ids.iter().map(|&id| id as i64).collect();
+                let (sql, params) = chunk_delete_in_sql(delete_ids);
                 tx.execute(&sql, rusqlite::params_from_iter(params.iter()))
                     .map_err(|e| VectorError::Database(e.to_string()))?;
             }
@@ -419,11 +422,7 @@ impl ChunkStore {
 
         #[cfg(feature = "local")]
         {
-            let placeholders: String = std::iter::repeat_n("?", ids.len())
-                .collect::<Vec<_>>()
-                .join(",");
-            let sql = format!("DELETE FROM chunks WHERE id IN ({placeholders})");
-            let params: Vec<i64> = ids.iter().map(|&id| id as i64).collect();
+            let (sql, params) = chunk_delete_in_sql(ids);
             let conn = self.conn.lock().expect("ChunkStore mutex poisoned");
             conn.execute(&sql, rusqlite::params_from_iter(params.iter()))
                 .map_err(|e| VectorError::Database(e.to_string()))?;
@@ -438,18 +437,13 @@ impl ChunkStore {
     /// Atomically reserve a contiguous range of chunk IDs inside the mutex.
     /// Uses a `max_chunk_id` entry in the meta table as an atomic counter so that
     /// parallel callers cannot observe the same MAX(id) and produce duplicates.
-    fn allocate_chunk_ids(&self, count: u64) -> Result<u64, VectorError> {
+    /// Returns the first ID in the reserved range; the caller owns [first, first+count).
+    pub(crate) fn allocate_chunk_ids(&self, count: u64) -> Result<u64, VectorError> {
         require_feature!(Database, count);
 
         #[cfg(feature = "local")]
         {
             let conn = self.conn.lock().expect("ChunkStore mutex poisoned");
-            conn.execute(
-                "INSERT INTO meta (key, value) VALUES ('max_chunk_id', '0') \
-                 ON CONFLICT(key) DO NOTHING",
-                [],
-            )
-            .map_err(|e| VectorError::Database(e.to_string()))?;
             let next: i64 = conn
                 .query_row(
                     "UPDATE meta SET value = CAST(CAST(value AS INTEGER) + ?1 AS TEXT) \
@@ -477,18 +471,7 @@ impl ChunkStore {
                 .map_err(|e| VectorError::Database(e.to_string()))?;
 
             let mut rows = stmt
-                .query_map(params![id as i64], |row| {
-                    Ok(Chunk {
-                        id: row.get::<_, i64>(0)? as u64,
-                        note_path: row.get::<_, String>(1)?,
-                        chunk_index: row.get::<_, i64>(2)? as u32,
-                        total_chunks: row.get::<_, i64>(3)? as u32,
-                        start_byte: row.get::<_, i64>(4)? as u64,
-                        end_byte: row.get::<_, i64>(5)? as u64,
-                        content_hash: row.get::<_, String>(6)?,
-                        preview: row.get::<_, String>(7)?,
-                    })
-                })
+                .query_map(params![id as i64], row_to_chunk)
                 .map_err(|e| VectorError::Database(e.to_string()))?;
 
             match rows.next() {
@@ -646,6 +629,17 @@ mod tests {
     fn delete_chunk_ids_empty_is_noop() {
         let (store, _dir) = open_store();
         store.delete_chunk_ids(&[]).unwrap();
+    }
+
+    #[test]
+    fn next_chunk_id_after_clear_all() {
+        let (store, _dir) = open_store();
+        store
+            .insert_chunks_tx("a.md", 1, "h", &[make_chunk(5, "a.md", 0, 1, "ha")])
+            .unwrap();
+        store.clear_all().unwrap();
+        // Counter resets; sequence restarts from 1.
+        assert_eq!(store.next_chunk_id().unwrap(), 1);
     }
 
     #[test]

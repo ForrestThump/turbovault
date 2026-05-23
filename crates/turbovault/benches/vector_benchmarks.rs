@@ -345,6 +345,8 @@ async fn setup_vector_infra(
         chunks.clone(),
         vc.rrf_k,
         vc.bm25_weight,
+        vc.search_overfetch_factor,
+        vc.min_similarity,
     ));
 
     (router, index, chunks)
