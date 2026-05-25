@@ -316,6 +316,59 @@ performance:
 #   log_level: info
 #   security_auditing: true
 
+# ------------------------------------------------------------------------------
+# TOOL ALIASES (Advanced)
+# ------------------------------------------------------------------------------
+# Define custom tool aliases backed by existing TurboVault tools.
+#
+# Each alias appears to the model as an independent tool. Pre-filled arguments
+# (preset_args) are injected automatically and hidden from the model's schema,
+# so the alias presents a clean, narrowed interface over the underlying tool.
+#
+# Fields per alias:
+#   name        - the tool name the model sees and calls (required)
+#   tool        - the underlying TurboVault tool to invoke (required)
+#   description - custom description shown to the model (optional; inherits
+#                 from the underlying tool if omitted)
+#   title       - human-readable display title (optional)
+#   preset_args - key/value pairs always pre-filled and not shown in the
+#                 model's schema (optional)
+#
+# Composition with tool_visibility:
+#   Alias tools pass through the same allow/hide/disable rules as real tools.
+#   To expose an alias while hiding the underlying tool from the model, list
+#   the underlying tool name under tool_visibility.hidden.
+#
+# Example — narrow search to a specific tag:
+#
+# tool_aliases:
+#   aliases:
+#     - name: find_journal
+#       tool: search
+#       description: Search within Daily Journal notes
+#       preset_args:
+#         tag: journal
+#
+#     - name: list_open_tasks
+#       tool: query_metadata
+#       description: List all notes with status=todo
+#       preset_args:
+#         key: status
+#         value: todo
+#
+#     - name: quick_health
+#       tool: quick_health_check
+#       description: Fast vault health summary (no args needed)
+#
+# Uncomment and customize as needed:
+# tool_aliases:
+#   aliases:
+#     - name: find_journal
+#       tool: search
+#       description: Search within Daily Journal notes
+#       preset_args:
+#         tag: journal
+
 # ==============================================================================
 # END OF CONFIGURATION
 # ==============================================================================

@@ -68,6 +68,7 @@ pub mod resources;
 pub mod tool_visibility;
 pub mod tools;
 
+pub use tool_visibility::{ToolNameFilter, TurboVaultConfig};
 pub use tools::ObsidianMcpServer;
 pub use turbovault_core::prelude::*;
 pub use turbovault_tools::*;

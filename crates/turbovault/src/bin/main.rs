@@ -3,10 +3,11 @@
 use clap::Parser;
 use std::path::PathBuf;
 use turbomcp::telemetry::TelemetryConfig;
-use turbomcp::{McpServerExt, ProtocolConfig, VisibilityLayer};
+use turbomcp::{McpServerExt, ProtocolConfig};
+use turbomcp_server::AliasLayer;
 use turbovault::ObsidianMcpServer;
 use turbovault::tool_visibility::{
-    ToolVisibilityOverrides, ToolVisibilitySettings, default_config_path,
+    ToolNameFilter, ToolVisibilityOverrides, TurboVaultConfig, default_config_path,
 };
 use turbovault_core::VaultConfig;
 use turbovault_core::cache::VaultCache;
@@ -70,7 +71,9 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command-line arguments
     let args = Args::parse();
-    let tool_visibility = load_tool_visibility(&args).await?;
+    let config = load_config(&args).await?;
+    let tool_visibility = config.tool_visibility;
+    let alias_config = config.tool_aliases;
 
     // Validate output format (unless STDIO transport, which always uses JSON)
     let output_format = if args.transport == "stdio" {
@@ -321,8 +324,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let server = VisibilityLayer::new(server)
-        .with_visibility_config(tool_visibility.into_visibility_config());
+    if !alias_config.aliases.is_empty() {
+        log::info!(
+            "Tool aliases configured: {} alias(es) registered",
+            alias_config.aliases.len()
+        );
+        for alias in &alias_config.aliases {
+            log::debug!(
+                "  alias '{}' -> '{}' ({} preset arg(s))",
+                alias.name,
+                alias.tool,
+                alias.preset_args.len()
+            );
+        }
+    }
+
+    let server = AliasLayer::new(server, alias_config);
+    let server = ToolNameFilter::new(server, tool_visibility);
 
     match args.transport.as_str() {
         "stdio" => {
@@ -421,23 +439,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn load_tool_visibility(
-    args: &Args,
-) -> Result<ToolVisibilitySettings, Box<dyn std::error::Error>> {
-    let mut settings = match args.config.as_deref() {
-        Some(path) => ToolVisibilitySettings::from_yaml_file(path).await?,
+async fn load_config(args: &Args) -> Result<TurboVaultConfig, Box<dyn std::error::Error>> {
+    let mut config = match args.config.as_deref() {
+        Some(path) => TurboVaultConfig::from_yaml_file(path).await?,
         None => match default_config_path().filter(|path| path.exists()) {
-            Some(path) => ToolVisibilitySettings::from_yaml_file(path).await?,
-            None => ToolVisibilitySettings::default(),
+            Some(path) => TurboVaultConfig::from_yaml_file(path).await?,
+            None => TurboVaultConfig::default(),
         },
     };
 
-    settings.merge_cli(ToolVisibilityOverrides {
+    config.tool_visibility.merge_cli(ToolVisibilityOverrides {
         allowed: args.allowed_tools.clone(),
         hidden: args.hidden_tools.clone(),
         disabled: args.disabled_tools.clone(),
         require_read_only: args.require_read_only_tools,
     });
 
-    Ok(settings)
+    Ok(config)
 }

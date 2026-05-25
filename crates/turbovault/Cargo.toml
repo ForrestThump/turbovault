@@ -58,6 +58,7 @@ turbovault-tools = { workspace = true }
 
 # MCP server framework (features passed through from turbovault)
 turbomcp = { workspace = true, features = ["stdio", "telemetry"] }
+turbomcp-server = { workspace = true }
 
 schemars = { workspace = true }
 shellexpand = { workspace = true }

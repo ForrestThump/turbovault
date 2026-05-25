@@ -77,8 +77,9 @@ criterion = "0.8"
 # Logging
 log = "0.4"
 
-# MCP server framework
-turbomcp = { version = "3.1.5", default-features = false }
+# MCP server framework (pinned to ForrestThump fork, turbo-mcp-tool-aliasing branch)
+turbomcp = { git = "https://github.com/ForrestThump/turbomcp.git", branch = "claude/turbo-mcp-tool-aliasing-Xj9So", default-features = false }
+turbomcp-server = { git = "https://github.com/ForrestThump/turbomcp.git", branch = "claude/turbo-mcp-tool-aliasing-Xj9So", default-features = false }
 
 # SQL query engine (optional, for frontmatter SQL queries)
 gluesql = { version = "0.19", default-features = false, features = ["gluesql_memory_storage"] }

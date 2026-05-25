@@ -1,7 +1,16 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
-use turbomcp::VisibilityConfig;
+use serde_json::Value;
+use std::{
+    future::Future,
+    path::{Path, PathBuf},
+};
+use turbomcp::{
+    McpError, McpHandler, McpResult, Prompt, PromptResult, RequestContext, Resource, ResourceResult,
+    ServerInfo, Tool, ToolResult,
+};
+use turbomcp::__macro_support::turbomcp_core::marker::MaybeSend;
+use turbomcp_server::alias::AliasConfig;
 
 /// User-facing tool visibility settings loaded from TurboVault config.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,10 +35,42 @@ pub struct ToolVisibilityOverrides {
     pub require_read_only: bool,
 }
 
+/// Full TurboVault server config loaded from the YAML config file.
+///
+/// Combines tool-visibility rules with tool-alias definitions.
+#[derive(Debug, Clone, Default)]
+pub struct TurboVaultConfig {
+    pub tool_visibility: ToolVisibilitySettings,
+    pub tool_aliases: AliasConfig,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct TurboVaultConfigFile {
     tool_visibility: ToolVisibilitySettings,
+    tool_aliases: AliasConfig,
+}
+
+impl TurboVaultConfig {
+    /// Parse both visibility settings and alias config from a YAML string.
+    pub fn from_yaml_str(yaml: &str) -> anyhow::Result<Self> {
+        let file: TurboVaultConfigFile =
+            yaml_serde::from_str(yaml).context("invalid TurboVault YAML config")?;
+        Ok(Self {
+            tool_visibility: file.tool_visibility,
+            tool_aliases: file.tool_aliases,
+        })
+    }
+
+    /// Load both visibility settings and alias config from a YAML config file.
+    pub async fn from_yaml_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let path = path.as_ref();
+        let yaml = tokio::fs::read_to_string(path)
+            .await
+            .with_context(|| format!("failed to read config {}", path.display()))?;
+        Self::from_yaml_str(&yaml)
+            .with_context(|| format!("failed to parse config {}", path.display()))
+    }
 }
 
 impl ToolVisibilitySettings {
@@ -58,34 +99,178 @@ impl ToolVisibilitySettings {
         self.require_read_only |= overrides.require_read_only;
     }
 
-    /// Convert TurboVault settings to TurboMCP's runtime visibility config.
-    pub fn into_visibility_config(self) -> VisibilityConfig {
-        let mut config = VisibilityConfig::new();
-
-        if !self.allowed.is_empty() {
-            config = config.with_allowed_tools(self.allowed);
-        }
-
-        if !self.disabled.is_empty() {
-            config = config.with_disabled_tools(self.disabled);
-        }
-
-        if !self.hidden.is_empty() {
-            config = config.with_hidden_tools(self.hidden);
-        }
-
-        if self.require_read_only {
-            config = config.require_read_only_tools();
-        }
-
-        config
-    }
-
+    /// Returns true if any visibility rules are configured.
     pub fn has_rules(&self) -> bool {
         !self.allowed.is_empty()
             || !self.hidden.is_empty()
             || !self.disabled.is_empty()
             || self.require_read_only
+    }
+
+    /// Returns true if this tool should appear in `tools/list` (name-based check only).
+    ///
+    /// Note: `require_read_only` is applied at the [`ToolNameFilter`] layer using the
+    /// tool's actual annotation; this method checks only the name-based lists.
+    pub fn is_listed(&self, name: &str) -> bool {
+        if self.disabled.iter().any(|n| n == name) {
+            return false;
+        }
+        if self.hidden.iter().any(|n| n == name) {
+            return false;
+        }
+        if !self.allowed.is_empty() && !self.allowed.iter().any(|n| n == name) {
+            return false;
+        }
+        true
+    }
+
+    /// Returns true if direct calls to this tool are allowed (name-based check only).
+    ///
+    /// Hidden tools are not listed but ARE callable. Disabled tools (and tools
+    /// outside an active allow-list) reject direct calls.
+    pub fn is_enabled(&self, name: &str) -> bool {
+        if self.disabled.iter().any(|n| n == name) {
+            return false;
+        }
+        if !self.allowed.is_empty() && !self.allowed.iter().any(|n| n == name) {
+            return false;
+        }
+        true
+    }
+}
+
+/// Wraps an [`McpHandler`] and applies name-based tool visibility rules from
+/// [`ToolVisibilitySettings`].
+///
+/// This is the TurboVault-native replacement for turbomcp's tag-based
+/// `VisibilityLayer`, providing exact-name allow/hide/disable semantics
+/// as well as read-only enforcement.
+///
+/// # Composition order with `AliasLayer`
+///
+/// Always place `ToolNameFilter` on the **outside** of
+/// [`AliasLayer`](turbomcp_server::AliasLayer) so that alias tools are subject
+/// to the same visibility rules as real tools:
+///
+/// ```text
+/// ToolNameFilter(outer)       <- filters merged tool list
+///   AliasLayer(middle)        <- exposes aliases as first-class tools
+///     ObsidianMcpServer(inner) <- real tool implementations
+/// ```
+#[derive(Clone)]
+pub struct ToolNameFilter<H> {
+    inner: H,
+    settings: ToolVisibilitySettings,
+}
+
+impl<H> ToolNameFilter<H> {
+    pub fn new(inner: H, settings: ToolVisibilitySettings) -> Self {
+        Self { inner, settings }
+    }
+
+    pub fn inner(&self) -> &H {
+        &self.inner
+    }
+
+    pub fn into_inner(self) -> H {
+        self.inner
+    }
+}
+
+#[allow(clippy::manual_async_fn)]
+impl<H: McpHandler> McpHandler for ToolNameFilter<H> {
+    fn server_info(&self) -> ServerInfo {
+        self.inner.server_info()
+    }
+
+    fn list_tools(&self) -> Vec<Tool> {
+        self.inner
+            .list_tools()
+            .into_iter()
+            .filter(|t| {
+                if !self.settings.is_listed(&t.name) {
+                    return false;
+                }
+                if self.settings.require_read_only {
+                    let is_ro = t
+                        .annotations
+                        .as_ref()
+                        .and_then(|a| a.read_only_hint)
+                        .unwrap_or(false);
+                    if !is_ro {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect()
+    }
+
+    fn list_resources(&self) -> Vec<Resource> {
+        self.inner.list_resources()
+    }
+
+    fn list_prompts(&self) -> Vec<Prompt> {
+        self.inner.list_prompts()
+    }
+
+    fn call_tool<'a>(
+        &'a self,
+        name: &'a str,
+        args: Value,
+        ctx: &'a RequestContext,
+    ) -> impl Future<Output = McpResult<ToolResult>> + MaybeSend + 'a {
+        async move {
+            if !self.settings.has_rules() {
+                return self.inner.call_tool(name, args, ctx).await;
+            }
+            // Name-based enforcement: disabled + allow-list.
+            if !self.settings.is_enabled(name) {
+                return Err(McpError::tool_not_found(name));
+            }
+            // require_read_only: look up the tool's annotation.
+            if self.settings.require_read_only {
+                let tools = self.inner.list_tools();
+                if let Some(tool) = tools.iter().find(|t| t.name == name) {
+                    let is_ro = tool
+                        .annotations
+                        .as_ref()
+                        .and_then(|a| a.read_only_hint)
+                        .unwrap_or(false);
+                    if !is_ro {
+                        return Err(McpError::tool_not_found(name));
+                    }
+                }
+            }
+            self.inner.call_tool(name, args, ctx).await
+        }
+    }
+
+    fn read_resource<'a>(
+        &'a self,
+        uri: &'a str,
+        ctx: &'a RequestContext,
+    ) -> impl Future<Output = McpResult<ResourceResult>> + MaybeSend + 'a {
+        async move { self.inner.read_resource(uri, ctx).await }
+    }
+
+    fn get_prompt<'a>(
+        &'a self,
+        name: &'a str,
+        args: Option<Value>,
+        ctx: &'a RequestContext,
+    ) -> impl Future<Output = McpResult<PromptResult>> + MaybeSend + 'a {
+        async move { self.inner.get_prompt(name, args, ctx).await }
+    }
+
+    fn on_initialize(&self) -> impl Future<Output = McpResult<()>> + MaybeSend {
+        let fut = self.inner.on_initialize();
+        async move { fut.await }
+    }
+
+    fn on_shutdown(&self) -> impl Future<Output = McpResult<()>> + MaybeSend {
+        let fut = self.inner.on_shutdown();
+        async move { fut.await }
     }
 }
 
@@ -126,23 +311,26 @@ tool_visibility:
 "#;
 
         let settings = ToolVisibilitySettings::from_yaml_str(yaml).unwrap();
-        let config = settings.into_visibility_config();
 
-        assert!(config.tools.is_listed("read_note"));
-        assert!(!config.tools.is_listed("full_health_analysis"));
-        assert!(config.tools.is_enabled("full_health_analysis"));
-        assert!(!config.tools.is_enabled("delete_note"));
-        assert!(config.require_read_only_tools);
+        // read_note is in allowed and not hidden/disabled.
+        assert!(settings.is_listed("read_note"));
+        // full_health_analysis is in allowed but hidden: not listed.
+        assert!(!settings.is_listed("full_health_analysis"));
+        // hidden tools remain callable.
+        assert!(settings.is_enabled("full_health_analysis"));
+        // disabled tools are not callable.
+        assert!(!settings.is_enabled("delete_note"));
+        // require_read_only flag is preserved.
+        assert!(settings.require_read_only);
     }
 
     #[test]
     fn empty_config_keeps_all_tools_visible_and_callable() {
         let settings = ToolVisibilitySettings::from_yaml_str("{}").unwrap();
-        let config = settings.into_visibility_config();
 
-        assert!(config.tools.is_listed("read_note"));
-        assert!(config.tools.is_enabled("delete_note"));
-        assert!(!config.require_read_only_tools);
+        assert!(settings.is_listed("read_note"));
+        assert!(settings.is_enabled("delete_note"));
+        assert!(!settings.require_read_only);
     }
 
     #[test]
@@ -163,13 +351,74 @@ tool_visibility:
             require_read_only: true,
         });
 
-        let config = settings.into_visibility_config();
+        // Only read_note is in the allow-list: others are not listed.
+        assert!(settings.is_listed("read_note"));
+        // delete_note is disabled regardless of allow-list.
+        assert!(!settings.is_enabled("delete_note"));
+        // write_note was disabled via CLI.
+        assert!(!settings.is_enabled("write_note"));
+        // full_health_analysis is hidden: not listed but still callable via name.
+        assert!(!settings.is_listed("full_health_analysis"));
+        // query_frontmatter_sql was hidden via CLI.
+        assert!(!settings.is_listed("query_frontmatter_sql"));
+        assert!(settings.require_read_only);
+    }
 
-        assert!(config.tools.is_listed("read_note"));
-        assert!(!config.tools.is_enabled("delete_note"));
-        assert!(!config.tools.is_enabled("write_note"));
-        assert!(!config.tools.is_listed("full_health_analysis"));
-        assert!(!config.tools.is_listed("query_frontmatter_sql"));
-        assert!(config.require_read_only_tools);
+    #[test]
+    fn parses_tool_aliases_from_yaml() {
+        let yaml = r#"
+tool_aliases:
+  aliases:
+    - name: find_journal
+      tool: search
+      description: Search within Daily Journal notes
+      preset_args:
+        tag: journal
+    - name: list_tasks
+      tool: query_metadata
+      preset_args:
+        key: status
+        value: todo
+"#;
+
+        let config = TurboVaultConfig::from_yaml_str(yaml).unwrap();
+        assert_eq!(config.tool_aliases.aliases.len(), 2);
+        assert_eq!(config.tool_aliases.aliases[0].name, "find_journal");
+        assert_eq!(config.tool_aliases.aliases[0].tool, "search");
+        assert_eq!(
+            config.tool_aliases.aliases[0].description.as_deref(),
+            Some("Search within Daily Journal notes")
+        );
+        assert_eq!(
+            config.tool_aliases.aliases[0]
+                .preset_args
+                .get("tag")
+                .and_then(|v| v.as_str()),
+            Some("journal")
+        );
+        assert_eq!(config.tool_aliases.aliases[1].name, "list_tasks");
+    }
+
+    #[test]
+    fn empty_tool_aliases_section_is_valid() {
+        let config = TurboVaultConfig::from_yaml_str("{}").unwrap();
+        assert!(config.tool_aliases.aliases.is_empty());
+    }
+
+    #[test]
+    fn combined_config_parses_both_sections() {
+        let yaml = r#"
+tool_visibility:
+  disabled:
+    - delete_note
+tool_aliases:
+  aliases:
+    - name: quick_search
+      tool: search
+"#;
+        let config = TurboVaultConfig::from_yaml_str(yaml).unwrap();
+        assert!(config.tool_visibility.disabled.contains(&"delete_note".to_string()));
+        assert_eq!(config.tool_aliases.aliases.len(), 1);
+        assert_eq!(config.tool_aliases.aliases[0].name, "quick_search");
     }
 }
