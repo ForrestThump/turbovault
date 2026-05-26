@@ -204,6 +204,19 @@ impl<H> ToolNameFilter<H> {
     }
 }
 
+impl<H: std::fmt::Debug> std::fmt::Debug for ToolNameFilter<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolNameFilter")
+            .field("inner", &self.inner)
+            .field("settings", &self.settings)
+            .field(
+                "ro_tool_names_count",
+                &self.ro_tool_names.as_ref().map(|s| s.len()),
+            )
+            .finish()
+    }
+}
+
 #[allow(clippy::manual_async_fn)]
 impl<H: McpHandler> McpHandler for ToolNameFilter<H> {
     fn server_info(&self) -> ServerInfo {
