@@ -2,6 +2,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    collections::HashSet,
     future::Future,
     path::{Path, PathBuf},
 };
@@ -162,13 +163,38 @@ impl ToolVisibilitySettings {
 pub struct ToolNameFilter<H> {
     inner: H,
     settings: ToolVisibilitySettings,
+    /// Names of read-only tools; computed once at construction when `require_read_only=true`.
+    ro_tool_names: Option<HashSet<String>>,
+}
+
+impl<H: McpHandler> ToolNameFilter<H> {
+    pub fn new(inner: H, settings: ToolVisibilitySettings) -> Self {
+        let ro_tool_names = if settings.require_read_only {
+            Some(
+                inner
+                    .list_tools()
+                    .into_iter()
+                    .filter(|t| {
+                        t.annotations
+                            .as_ref()
+                            .and_then(|a| a.read_only_hint)
+                            .unwrap_or(false)
+                    })
+                    .map(|t| t.name)
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        Self {
+            inner,
+            settings,
+            ro_tool_names,
+        }
+    }
 }
 
 impl<H> ToolNameFilter<H> {
-    pub fn new(inner: H, settings: ToolVisibilitySettings) -> Self {
-        Self { inner, settings }
-    }
-
     pub fn inner(&self) -> &H {
         &self.inner
     }
@@ -192,15 +218,8 @@ impl<H: McpHandler> McpHandler for ToolNameFilter<H> {
                 if !self.settings.is_listed(&t.name) {
                     return false;
                 }
-                if self.settings.require_read_only {
-                    let is_ro = t
-                        .annotations
-                        .as_ref()
-                        .and_then(|a| a.read_only_hint)
-                        .unwrap_or(false);
-                    if !is_ro {
-                        return false;
-                    }
+                if let Some(ro_names) = &self.ro_tool_names {
+                    return ro_names.contains(&t.name);
                 }
                 true
             })
@@ -229,18 +248,11 @@ impl<H: McpHandler> McpHandler for ToolNameFilter<H> {
             if !self.settings.is_enabled(name) {
                 return Err(McpError::tool_not_found(name));
             }
-            // require_read_only: look up the tool's annotation.
-            if self.settings.require_read_only {
-                let tools = self.inner.list_tools();
-                if let Some(tool) = tools.iter().find(|t| t.name == name) {
-                    let is_ro = tool
-                        .annotations
-                        .as_ref()
-                        .and_then(|a| a.read_only_hint)
-                        .unwrap_or(false);
-                    if !is_ro {
-                        return Err(McpError::tool_not_found(name));
-                    }
+            // require_read_only: O(1) lookup against the pre-computed set.
+            // Unknown tools (not in inner.list_tools() at construction) are denied.
+            if let Some(ro_names) = &self.ro_tool_names {
+                if !ro_names.contains(name) {
+                    return Err(McpError::tool_not_found(name));
                 }
             }
             self.inner.call_tool(name, args, ctx).await
