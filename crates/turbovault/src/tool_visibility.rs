@@ -11,6 +11,7 @@ use turbomcp::{
 };
 use turbomcp::__macro_support::turbomcp_core::marker::MaybeSend;
 use turbomcp_server::alias::AliasConfig;
+use turbomcp_server::__macro_support::turbomcp_types::{ListTasksResult, ResourceTemplate, Task};
 
 /// User-facing tool visibility settings loaded from TurboVault config.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,6 +272,82 @@ impl<H: McpHandler> McpHandler for ToolNameFilter<H> {
     fn on_shutdown(&self) -> impl Future<Output = McpResult<()>> + MaybeSend {
         let fut = self.inner.on_shutdown();
         async move { fut.await }
+    }
+
+    // ===== Delegate all remaining trait methods to the inner handler =====
+    //
+    // MAINTENANCE NOTE: when McpHandler gains new methods (e.g. a new
+    // subscription or task API), add a delegation here. Omitting a method
+    // silently falls through to the trait's no-op default and drops any
+    // behavior the inner handler provides.
+
+    fn list_resource_templates(&self) -> Vec<ResourceTemplate> {
+        self.inner.list_resource_templates()
+    }
+
+    fn complete<'a>(
+        &'a self,
+        params: Value,
+        ctx: &'a RequestContext,
+    ) -> impl Future<Output = McpResult<Value>> + MaybeSend + 'a {
+        async move { self.inner.complete(params, ctx).await }
+    }
+
+    fn subscribe<'a>(
+        &'a self,
+        uri: &'a str,
+        ctx: &'a RequestContext,
+    ) -> impl Future<Output = McpResult<()>> + MaybeSend + 'a {
+        async move { self.inner.subscribe(uri, ctx).await }
+    }
+
+    fn unsubscribe<'a>(
+        &'a self,
+        uri: &'a str,
+        ctx: &'a RequestContext,
+    ) -> impl Future<Output = McpResult<()>> + MaybeSend + 'a {
+        async move { self.inner.unsubscribe(uri, ctx).await }
+    }
+
+    fn set_log_level<'a>(
+        &'a self,
+        level: &'a str,
+        ctx: &'a RequestContext,
+    ) -> impl Future<Output = McpResult<()>> + MaybeSend + 'a {
+        async move { self.inner.set_log_level(level, ctx).await }
+    }
+
+    fn list_tasks<'a>(
+        &'a self,
+        cursor: Option<&'a str>,
+        limit: Option<usize>,
+        ctx: &'a RequestContext,
+    ) -> impl Future<Output = McpResult<ListTasksResult>> + MaybeSend + 'a {
+        async move { self.inner.list_tasks(cursor, limit, ctx).await }
+    }
+
+    fn get_task<'a>(
+        &'a self,
+        task_id: &'a str,
+        ctx: &'a RequestContext,
+    ) -> impl Future<Output = McpResult<Task>> + MaybeSend + 'a {
+        async move { self.inner.get_task(task_id, ctx).await }
+    }
+
+    fn cancel_task<'a>(
+        &'a self,
+        task_id: &'a str,
+        ctx: &'a RequestContext,
+    ) -> impl Future<Output = McpResult<Task>> + MaybeSend + 'a {
+        async move { self.inner.cancel_task(task_id, ctx).await }
+    }
+
+    fn get_task_result<'a>(
+        &'a self,
+        task_id: &'a str,
+        ctx: &'a RequestContext,
+    ) -> impl Future<Output = McpResult<Value>> + MaybeSend + 'a {
+        async move { self.inner.get_task_result(task_id, ctx).await }
     }
 }
 
