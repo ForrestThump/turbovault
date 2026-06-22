@@ -168,12 +168,31 @@ impl VaultManager {
     /// If `expected_hash` is provided, the file's current content hash is verified
     /// before writing. If it doesn't match (another agent modified the file since
     /// the caller last read it), a `ConcurrencyError` is returned.
-    #[instrument(skip(self, content), fields(file = ?path, size = content.len()), name = "vault_write_file")]
     pub async fn write_file(
         &self,
         path: &Path,
         content: &str,
         expected_hash: Option<&str>,
+    ) -> Result<()> {
+        self.write_file_with_metadata(path, content, expected_hash, None)
+            .await
+    }
+
+    /// Write a file, attaching custom `metadata` to the recorded audit entry.
+    ///
+    /// Behaves exactly like [`write_file`](Self::write_file), but lets callers tag the
+    /// resulting audit-log entry with arbitrary JSON — for example write provenance, a
+    /// correlation id, or the name of the actor performing the write. The value is
+    /// stored verbatim on [`AuditEntry::metadata`](turbovault_audit::AuditEntry) and is
+    /// only recorded when an audit log is configured; it never affects the bytes written
+    /// to disk. Pass `None` for the default (empty) metadata.
+    #[instrument(skip(self, content, metadata), fields(file = ?path, size = content.len()), name = "vault_write_file")]
+    pub async fn write_file_with_metadata(
+        &self,
+        path: &Path,
+        content: &str,
+        expected_hash: Option<&str>,
+        metadata: Option<serde_json::Value>,
     ) -> Result<()> {
         use crate::edit::compute_hash;
 
@@ -237,6 +256,10 @@ impl VaultManager {
             };
 
             let mut entry = AuditEntry::new(operation, &rel_path);
+
+            if let Some(meta) = &metadata {
+                entry = entry.with_metadata(meta.clone());
+            }
 
             // Store before snapshot
             if let Some(ref before) = before_content {
@@ -319,13 +342,32 @@ impl VaultManager {
     ///
     /// # Returns
     /// EditResult with new hash, applied blocks count, and optional diff preview
-    #[instrument(skip(self, edits), fields(file = ?path, dry_run), name = "vault_edit_file")]
     pub async fn edit_file(
         &self,
         path: &Path,
         edits: &str,
         expected_hash: Option<&str>,
         dry_run: bool,
+    ) -> Result<crate::edit::EditResult> {
+        self.edit_file_with_metadata(path, edits, expected_hash, dry_run, None)
+            .await
+    }
+
+    /// Edit a file, attaching custom `metadata` to the recorded audit entry.
+    ///
+    /// Behaves exactly like [`edit_file`](Self::edit_file), but lets callers tag the
+    /// resulting audit-log entry with arbitrary JSON (e.g. write provenance or a
+    /// correlation id). The metadata is ignored for a `dry_run` (which writes nothing)
+    /// and is only recorded when an audit log is configured. Pass `None` for the
+    /// default (empty) metadata.
+    #[instrument(skip(self, edits, metadata), fields(file = ?path, dry_run), name = "vault_edit_file")]
+    pub async fn edit_file_with_metadata(
+        &self,
+        path: &Path,
+        edits: &str,
+        expected_hash: Option<&str>,
+        dry_run: bool,
+        metadata: Option<serde_json::Value>,
     ) -> Result<crate::edit::EditResult> {
         use crate::edit::{EditEngine, compute_hash};
 
@@ -366,15 +408,33 @@ impl VaultManager {
         // Release cache guard before write (avoid deadlock)
         drop(_cache_guard);
 
-        // Write atomically (hash already validated above, pass None)
-        self.write_file(&vault_path, &new_content, None).await?;
+        // Write atomically (hash already validated above, pass None), forwarding the
+        // caller's audit metadata to the recorded entry.
+        self.write_file_with_metadata(&vault_path, &new_content, None, metadata)
+            .await?;
 
         Ok(edit_result)
     }
 
     /// Delete file from vault with audit trail, graph cleanup, and optional concurrency check.
-    #[instrument(skip(self), fields(file = ?path), name = "vault_delete_file")]
     pub async fn delete_file(&self, path: &Path, expected_hash: Option<&str>) -> Result<()> {
+        self.delete_file_with_metadata(path, expected_hash, None)
+            .await
+    }
+
+    /// Delete a file, attaching custom `metadata` to the recorded audit entry.
+    ///
+    /// Behaves exactly like [`delete_file`](Self::delete_file), but lets callers tag the
+    /// resulting audit-log entry with arbitrary JSON (e.g. write provenance or a
+    /// correlation id). Only recorded when an audit log is configured. Pass `None` for
+    /// the default (empty) metadata.
+    #[instrument(skip(self, metadata), fields(file = ?path), name = "vault_delete_file")]
+    pub async fn delete_file_with_metadata(
+        &self,
+        path: &Path,
+        expected_hash: Option<&str>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<()> {
         use crate::edit::compute_hash;
 
         let vault_path = self.resolve_path(path)?;
@@ -421,6 +481,10 @@ impl VaultManager {
 
             let mut entry = AuditEntry::new(OperationType::Delete, &rel_path);
 
+            if let Some(meta) = &metadata {
+                entry = entry.with_metadata(meta.clone());
+            }
+
             if let Some(ref before) = before_content {
                 match snapshot_store.store(before).await {
                     Ok(snap_id) => {
@@ -439,12 +503,29 @@ impl VaultManager {
     }
 
     /// Move file within vault with audit trail, graph update, and optional concurrency check.
-    #[instrument(skip(self), fields(from = ?from, to = ?to), name = "vault_move_file")]
     pub async fn move_file(
         &self,
         from: &Path,
         to: &Path,
         expected_hash: Option<&str>,
+    ) -> Result<()> {
+        self.move_file_with_metadata(from, to, expected_hash, None)
+            .await
+    }
+
+    /// Move a file, attaching custom `metadata` to the recorded audit entry.
+    ///
+    /// Behaves exactly like [`move_file`](Self::move_file), but lets callers tag the
+    /// resulting audit-log entry with arbitrary JSON (e.g. write provenance or a
+    /// correlation id). Only recorded when an audit log is configured. Pass `None` for
+    /// the default (empty) metadata.
+    #[instrument(skip(self, metadata), fields(from = ?from, to = ?to), name = "vault_move_file")]
+    pub async fn move_file_with_metadata(
+        &self,
+        from: &Path,
+        to: &Path,
+        expected_hash: Option<&str>,
+        metadata: Option<serde_json::Value>,
     ) -> Result<()> {
         use crate::edit::compute_hash;
 
@@ -541,6 +622,10 @@ impl VaultManager {
                 .to_string();
 
             let mut entry = AuditEntry::new(OperationType::Move, &rel_from).with_new_path(&rel_to);
+
+            if let Some(meta) = &metadata {
+                entry = entry.with_metadata(meta.clone());
+            }
 
             match snapshot_store.store(&content).await {
                 Ok(snap_id) => {
@@ -919,6 +1004,132 @@ mod tests {
             .unwrap();
         config.vaults.push(vault_config);
         config
+    }
+
+    /// Build a manager with the audit log + snapshot store enabled.
+    async fn manager_with_audit(vault_dir: &Path) -> VaultManager {
+        let config = create_test_config(vault_dir);
+        let mut manager = VaultManager::new(config).unwrap();
+        let audit_log = Arc::new(AuditLog::new(vault_dir).await.unwrap());
+        let snapshot_store = Arc::new(SnapshotStore::new(audit_log.snapshot_dir().to_path_buf()));
+        manager.set_audit_log(audit_log, snapshot_store);
+        manager
+    }
+
+    /// Fetch the metadata of the most recent audit entry touching `path`.
+    async fn latest_audit_meta(manager: &VaultManager, path: &str) -> serde_json::Value {
+        use turbovault_audit::AuditFilter;
+        let filter = AuditFilter::new().with_path(path.to_string());
+        let entries = manager
+            .audit_log()
+            .expect("audit log should be configured")
+            .query(&filter)
+            .await
+            .unwrap();
+        entries
+            .first()
+            .expect("expected at least one audit entry")
+            .metadata
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn test_write_file_with_metadata_records_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = manager_with_audit(temp_dir.path()).await;
+
+        let meta = serde_json::json!({ "source": "agent-x", "correlation_id": "abc-123" });
+        manager
+            .write_file_with_metadata(Path::new("note.md"), "hello", None, Some(meta.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(latest_audit_meta(&manager, "note.md").await, meta);
+    }
+
+    #[tokio::test]
+    async fn test_write_file_without_metadata_defaults_to_empty_object() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = manager_with_audit(temp_dir.path()).await;
+
+        manager
+            .write_file(Path::new("plain.md"), "hi", None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            latest_audit_meta(&manager, "plain.md").await,
+            serde_json::json!({})
+        );
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_with_metadata_records_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = manager_with_audit(temp_dir.path()).await;
+
+        manager
+            .write_file(Path::new("edit.md"), "alpha", None)
+            .await
+            .unwrap();
+
+        let meta = serde_json::json!({ "source": "editor-bot" });
+        let edits = "<<<<<<< SEARCH\nalpha\n=======\nbeta\n>>>>>>> REPLACE\n";
+        manager
+            .edit_file_with_metadata(Path::new("edit.md"), edits, None, false, Some(meta.clone()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            manager.read_file(Path::new("edit.md")).await.unwrap(),
+            "beta"
+        );
+        assert_eq!(latest_audit_meta(&manager, "edit.md").await, meta);
+    }
+
+    #[tokio::test]
+    async fn test_delete_file_with_metadata_records_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = manager_with_audit(temp_dir.path()).await;
+
+        manager
+            .write_file(Path::new("del.md"), "bye", None)
+            .await
+            .unwrap();
+
+        let meta = serde_json::json!({ "source": "cleaner", "reason": "stale" });
+        manager
+            .delete_file_with_metadata(Path::new("del.md"), None, Some(meta.clone()))
+            .await
+            .unwrap();
+
+        // Newest entry for this path is the DELETE, which should carry the metadata.
+        assert_eq!(latest_audit_meta(&manager, "del.md").await, meta);
+    }
+
+    #[tokio::test]
+    async fn test_move_file_with_metadata_records_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = manager_with_audit(temp_dir.path()).await;
+
+        manager
+            .write_file(Path::new("src.md"), "content", None)
+            .await
+            .unwrap();
+
+        let meta = serde_json::json!({ "source": "mover" });
+        manager
+            .move_file_with_metadata(
+                Path::new("src.md"),
+                Path::new("dst.md"),
+                None,
+                Some(meta.clone()),
+            )
+            .await
+            .unwrap();
+
+        // The MOVE entry is recorded under the source path and carries the metadata.
+        assert_eq!(latest_audit_meta(&manager, "src.md").await, meta);
     }
 
     #[tokio::test]

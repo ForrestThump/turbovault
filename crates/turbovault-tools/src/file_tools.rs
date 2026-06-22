@@ -74,11 +74,28 @@ impl FileTools {
         mode: WriteMode,
         expected_hash: Option<&str>,
     ) -> Result<()> {
+        self.write_file_with_mode_and_metadata(path, content, mode, expected_hash, None)
+            .await
+    }
+
+    /// Write a file with mode support, tagging the audit entry with custom `metadata`.
+    ///
+    /// Identical to [`write_file_with_mode`](Self::write_file_with_mode) but forwards
+    /// `metadata` (e.g. write provenance or a correlation id) to the recorded audit
+    /// entry. Pass `None` for the default (empty) metadata.
+    pub async fn write_file_with_mode_and_metadata(
+        &self,
+        path: &str,
+        content: &str,
+        mode: WriteMode,
+        expected_hash: Option<&str>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<()> {
         match mode {
             WriteMode::Overwrite => {
                 let file_path = PathBuf::from(path);
                 self.manager
-                    .write_file(&file_path, content, expected_hash)
+                    .write_file_with_metadata(&file_path, content, expected_hash, metadata)
                     .await
             }
             WriteMode::Append => {
@@ -90,7 +107,7 @@ impl FileTools {
                 };
                 let file_path = PathBuf::from(path);
                 self.manager
-                    .write_file(&file_path, &combined, expected_hash)
+                    .write_file_with_metadata(&file_path, &combined, expected_hash, metadata)
                     .await
             }
             WriteMode::Prepend => {
@@ -99,7 +116,7 @@ impl FileTools {
                     let file_path = PathBuf::from(path);
                     return self
                         .manager
-                        .write_file(&file_path, content, expected_hash)
+                        .write_file_with_metadata(&file_path, content, expected_hash, metadata)
                         .await;
                 }
 
@@ -123,7 +140,7 @@ impl FileTools {
                 };
                 let file_path = PathBuf::from(path);
                 self.manager
-                    .write_file(&file_path, &combined, expected_hash)
+                    .write_file_with_metadata(&file_path, &combined, expected_hash, metadata)
                     .await
             }
         }
@@ -152,6 +169,25 @@ impl FileTools {
             .await
     }
 
+    /// Edit a file, tagging the audit entry with custom `metadata`.
+    ///
+    /// Identical to [`edit_file`](Self::edit_file) but forwards `metadata` (e.g. write
+    /// provenance or a correlation id) to the recorded audit entry. Pass `None` for the
+    /// default (empty) metadata.
+    pub async fn edit_file_with_metadata(
+        &self,
+        path: &str,
+        edits: &str,
+        expected_hash: Option<&str>,
+        dry_run: bool,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<turbovault_vault::EditResult> {
+        let file_path = PathBuf::from(path);
+        self.manager
+            .edit_file_with_metadata(&file_path, edits, expected_hash, dry_run, metadata)
+            .await
+    }
+
     /// Delete a file from the vault (with audit trail and graph cleanup)
     pub async fn delete_file(&self, path: &str) -> Result<()> {
         self.manager.delete_file(&PathBuf::from(path), None).await
@@ -165,6 +201,22 @@ impl FileTools {
     ) -> Result<()> {
         self.manager
             .delete_file(&PathBuf::from(path), expected_hash)
+            .await
+    }
+
+    /// Delete a file, tagging the audit entry with custom `metadata`.
+    ///
+    /// Like [`delete_file_with_hash`](Self::delete_file_with_hash) but forwards
+    /// `metadata` (e.g. write provenance or a correlation id) to the recorded audit
+    /// entry. Pass `None` for the default (empty) metadata.
+    pub async fn delete_file_with_metadata(
+        &self,
+        path: &str,
+        expected_hash: Option<&str>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<()> {
+        self.manager
+            .delete_file_with_metadata(&PathBuf::from(path), expected_hash, metadata)
             .await
     }
 
@@ -184,6 +236,28 @@ impl FileTools {
     ) -> Result<()> {
         self.manager
             .move_file(&PathBuf::from(from), &PathBuf::from(to), expected_hash)
+            .await
+    }
+
+    /// Move a file, tagging the audit entry with custom `metadata`.
+    ///
+    /// Like [`move_file_with_hash`](Self::move_file_with_hash) but forwards `metadata`
+    /// (e.g. write provenance or a correlation id) to the recorded audit entry. Pass
+    /// `None` for the default (empty) metadata.
+    pub async fn move_file_with_metadata(
+        &self,
+        from: &str,
+        to: &str,
+        expected_hash: Option<&str>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<()> {
+        self.manager
+            .move_file_with_metadata(
+                &PathBuf::from(from),
+                &PathBuf::from(to),
+                expected_hash,
+                metadata,
+            )
             .await
     }
 
