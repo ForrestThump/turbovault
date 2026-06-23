@@ -134,3 +134,9 @@ strip = false
 [profile.dev]
 opt-level = 0
 debug = true
+
+# Co-development patch (develop branch only): build against the local turbomcp
+# fork so in-flight features (e.g. request `_meta` pass-through) are testable
+# before they are published to crates.io. Remove before any upstream PR.
+[patch.crates-io]
+turbomcp = { path = "../turbomcp/crates/turbomcp" }

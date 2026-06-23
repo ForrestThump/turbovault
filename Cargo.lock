@@ -597,17 +597,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
-name = "chacha20"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f8d983286843e49675a4b7a2d174efe136dc93a18d69130dd18198a6c167601"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.3.0",
- "rand_core 0.10.1",
-]
-
-[[package]]
 name = "chrono"
 version = "0.4.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1487,7 +1476,6 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
- "rand_core 0.10.1",
  "wasip2",
  "wasip3",
 ]
@@ -3131,17 +3119,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rand"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
-dependencies = [
- "chacha20",
- "getrandom 0.4.2",
- "rand_core 0.10.1",
-]
-
-[[package]]
 name = "rand_chacha"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3179,12 +3156,6 @@ checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
 ]
-
-[[package]]
-name = "rand_core"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "rand_xoshiro"
@@ -4773,8 +4744,6 @@ dependencies = [
 [[package]]
 name = "turbomcp"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16906591ae2ad2f4e88ab5848030756b62346cb5c1a4ff5eff6820389f98f9b6"
 dependencies = [
  "axum",
  "schemars",
@@ -4796,8 +4765,6 @@ dependencies = [
 [[package]]
 name = "turbomcp-core"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f02ce2bef778c483364973c7bd41a5187a26c571d66c12a705176c071a9d7209"
 dependencies = [
  "base64",
  "chrono",
@@ -4813,8 +4780,6 @@ dependencies = [
 [[package]]
 name = "turbomcp-http"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57149a45488fa8b2244ff83a19ff7f7d96ccdeb4e9035d1b98a4728ae9fbf96c"
 dependencies = [
  "bytes",
  "fastrand",
@@ -4832,8 +4797,6 @@ dependencies = [
 [[package]]
 name = "turbomcp-macros"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3d54ebcb5ae8c66b211b19e2403dcaa2b1db7103bd4fb541b52084af3341f5d"
 dependencies = [
  "axum",
  "proc-macro-crate",
@@ -4851,8 +4814,6 @@ dependencies = [
 [[package]]
 name = "turbomcp-protocol"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23164990da108578193a6f4e190bec74a14b8394c51a5f862893bac2ef73451d"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -4866,7 +4827,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "pin-project-lite",
- "rand 0.10.1",
+ "rand 0.9.4",
  "regex",
  "serde",
  "serde_json",
@@ -4887,8 +4848,6 @@ dependencies = [
 [[package]]
 name = "turbomcp-server"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7085bc454707740622ea5aa1eeaa8b63f7626d9b2d90ad0577dc5ded20c70105"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4918,8 +4877,6 @@ dependencies = [
 [[package]]
 name = "turbomcp-stdio"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6214c4ca7c37487cdd31de0d126ae372b4d861f736f06fc878387a97db416abd"
 dependencies = [
  "bytes",
  "futures",
@@ -4936,8 +4893,6 @@ dependencies = [
 [[package]]
 name = "turbomcp-tcp"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c0386f37b8905b869bae04267f5ea8f47d38f05cbcb8b8fef58e37d9fb23db8"
 dependencies = [
  "bytes",
  "futures",
@@ -4955,8 +4910,6 @@ dependencies = [
 [[package]]
 name = "turbomcp-telemetry"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7f4d09f1e7be4479ef82fd1ca293c6ca2df72aba87bff5b505baefb901ef228"
 dependencies = [
  "futures-util",
  "http",
@@ -4981,8 +4934,6 @@ dependencies = [
 [[package]]
 name = "turbomcp-transport"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8744aef789f7f8e7cb64a0d0f1ea8a6de3fc543b8b23c8b3280e2813f5a9212a"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -4994,10 +4945,10 @@ dependencies = [
  "futures",
  "parking_lot",
  "pin-project-lite",
- "rand 0.10.1",
+ "rand 0.9.4",
  "serde",
  "serde_json",
- "sha2 0.11.0",
+ "sha2 0.10.9",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
@@ -5018,8 +4969,6 @@ dependencies = [
 [[package]]
 name = "turbomcp-transport-traits"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a87cca9ba22bc0dadd85ff971ab58179d8fdfb74d23d54b83f278a9e0cdbd17d"
 dependencies = [
  "bytes",
  "serde",
@@ -5032,8 +4981,6 @@ dependencies = [
 [[package]]
 name = "turbomcp-types"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd9cc4eef445f8743a8eff1872e93c10805f234a93dd1bf63777b19a47db8cf"
 dependencies = [
  "serde",
  "serde_json",
@@ -5042,8 +4989,6 @@ dependencies = [
 [[package]]
 name = "turbomcp-unix"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f1345b4f9113d7f62020fba35984e779eaec87d156184c839fb41f6f8e97dc7"
 dependencies = [
  "bytes",
  "futures",
@@ -5061,8 +5006,6 @@ dependencies = [
 [[package]]
 name = "turbomcp-websocket"
 version = "3.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b315c34ad3d9ebf503efa22ebe6f8bc07aa086abf700895fb6de6618976e006c"
 dependencies = [
  "backon",
  "bytes",
