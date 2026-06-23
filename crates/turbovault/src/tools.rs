@@ -578,12 +578,23 @@ impl ObsidianMcpServer {
         content: String,
         mode: Option<String>,
         expected_hash: Option<String>,
+        ctx: &RequestContext,
     ) -> McpResult<serde_json::Value> {
         let (vault_name, manager) = self.get_vault_pair().await?;
         let write_mode = WriteMode::from_str_opt(mode.as_deref()).map_err(to_mcp_error)?;
         let tools = FileTools::new(manager);
+        // Forward the request's `_meta` (if any) onto the audit entry's metadata. Turbovault does
+        // not interpret it — callers use it to record provenance/correlation that consumers read
+        // back from the audit log. Absent `_meta`, this is `None` (default empty metadata).
+        let metadata = ctx.get_metadata(REQUEST_META_KEY).cloned();
         tools
-            .write_file_with_mode(&path, &content, write_mode, expected_hash.as_deref())
+            .write_file_with_mode_and_metadata(
+                &path,
+                &content,
+                write_mode,
+                expected_hash.as_deref(),
+                metadata,
+            )
             .await
             .map_err(to_mcp_error)?;
 
