@@ -18,7 +18,7 @@ pub mod router;
 pub use build::IndexBuilder;
 pub use chunks::ChunkStore;
 pub use config::VectorConfig;
-pub use embedding::{EmbeddingEngine, FastembedEngine};
+pub use embedding::{EmbeddingEngine, FastembedEngine, FastembedReranker, Reranker};
 pub use error::VectorError;
 pub use index::VectorIndex;
 pub use router::{HybridResult, SearchRouter, VectorResult};

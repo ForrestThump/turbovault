@@ -189,7 +189,9 @@ pub mod vault_lifecycle;
 #[cfg(feature = "sql")]
 pub mod sql_engine;
 
-#[cfg(feature = "vector-search")]
+// Not actually vector-search-specific (no fastembed/usearch dependency) — `turbovault`'s
+// `explain_vault` tool uses `AnalysisTools` unconditionally, so gating this re-export behind
+// `vector-search` made the crate's own `default = []` feature set fail to compile.
 pub use analysis_tools::{AnalysisTools, VaultStats};
 pub use audit_tools::AuditTools;
 pub use batch_tools::BatchTools;

@@ -167,6 +167,19 @@ pub struct VectorSearchConfig {
     /// Score = 1.0 − cosine_distance; results below this threshold are discarded before
     /// RRF fusion and note deduplication.
     pub min_similarity: f32,
+    /// Enable cross-encoder reranking of over-fetched candidates before the final truncation to
+    /// `limit`. Reordering only — never changes which notes are eligible, only their final rank.
+    /// Off by default so existing callers/tests see identical results until opted in.
+    #[serde(default)]
+    pub rerank_enabled: bool,
+    /// Reranker model name, passed to `fastembed::TextRerank`. Supported:
+    /// "bge-reranker-base" (default), "jina-reranker-v1-turbo-en".
+    #[serde(default = "default_rerank_model")]
+    pub rerank_model: String,
+}
+
+fn default_rerank_model() -> String {
+    "bge-reranker-base".to_string()
 }
 
 impl Default for VectorSearchConfig {
@@ -184,6 +197,8 @@ impl Default for VectorSearchConfig {
             index_quantization: "f16".to_string(),
             search_overfetch_factor: 5,
             min_similarity: 0.3,
+            rerank_enabled: false,
+            rerank_model: "bge-reranker-base".to_string(),
         }
     }
 }

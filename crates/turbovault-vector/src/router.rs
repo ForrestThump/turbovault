@@ -1,5 +1,5 @@
 use crate::{
-    EmbeddingEngine, VectorError, VectorIndex,
+    EmbeddingEngine, Reranker, VectorError, VectorIndex,
     chunks::{Chunk, ChunkStore},
 };
 use std::collections::HashMap;
@@ -36,6 +36,7 @@ pub struct SearchRouter {
     bm25_weight: f32,
     overfetch_factor: usize,
     min_similarity: f32,
+    reranker: Option<Arc<dyn Reranker>>,
 }
 
 impl SearchRouter {
@@ -56,7 +57,17 @@ impl SearchRouter {
             bm25_weight,
             overfetch_factor,
             min_similarity,
+            reranker: None,
         }
+    }
+
+    /// Opt into cross-encoder reranking of the over-fetched, deduped-by-note candidate pool
+    /// before the final truncation to `limit`. Reordering only — never changes which notes are
+    /// eligible, only their final rank. Existing callers that don't call this see identical
+    /// behavior (plain cosine / RRF sort).
+    pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>) -> Self {
+        self.reranker = Some(reranker);
+        self
     }
 
     #[instrument(skip(self), fields(query_len = query.len()))]
@@ -108,12 +119,21 @@ impl SearchRouter {
             });
         }
 
-        // Sort by score descending, take limit
-        results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        // Rerank the full deduped candidate pool, or fall back to plain cosine-score order.
+        if let Some(reranker) = &self.reranker {
+            let previews: Vec<String> = results.iter().map(|r| r.chunk_preview.clone()).collect();
+            let rerank_scores = reranker.rerank(query, &previews).await?;
+            let mut ranked: Vec<(f32, VectorResult)> =
+                rerank_scores.into_iter().zip(results).collect();
+            ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            results = ranked.into_iter().map(|(_, r)| r).collect();
+        } else {
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
         results.truncate(limit);
         Ok(results)
     }
@@ -199,11 +219,17 @@ impl SearchRouter {
             scored.push((note_path, rrf_score, bm25_rank, vector_rank));
         }
 
-        // Sort by rrf_score descending, take limit
+        // Sort by rrf_score descending.
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(limit);
 
-        // Build HybridResult, looking up chunk info
+        // Without a reranker, only the top `limit` need their preview text looked up. With a
+        // reranker, the whole RRF-ranked candidate pool must be materialized first so it can be
+        // rescored against the query text, then truncated — this costs one extra chunk lookup
+        // per non-selected candidate, only paid when reranking is opted into.
+        if self.reranker.is_none() {
+            scored.truncate(limit);
+        }
+
         let mut results = Vec::with_capacity(scored.len());
         for (note_path, rrf_score, bm25_rank, vector_rank) in scored {
             let (preview, chunk_position) =
@@ -232,6 +258,16 @@ impl SearchRouter {
                 bm25_rank,
                 vector_rank,
             });
+        }
+
+        if let Some(reranker) = &self.reranker {
+            let previews: Vec<String> = results.iter().map(|r| r.chunk_preview.clone()).collect();
+            let rerank_scores = reranker.rerank(query, &previews).await?;
+            let mut ranked: Vec<(f32, HybridResult)> =
+                rerank_scores.into_iter().zip(results).collect();
+            ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            results = ranked.into_iter().map(|(_, r)| r).collect();
+            results.truncate(limit);
         }
 
         Ok(results)

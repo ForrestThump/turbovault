@@ -14,6 +14,8 @@ pub struct VectorConfig {
     pub index_quantization: String,
     pub search_overfetch_factor: usize,
     pub min_similarity: f32,
+    pub rerank_enabled: bool,
+    pub rerank_model: String,
 }
 
 impl From<&VectorSearchConfig> for VectorConfig {
@@ -34,6 +36,8 @@ impl From<&VectorSearchConfig> for VectorConfig {
             index_quantization: c.index_quantization.clone(),
             search_overfetch_factor: c.search_overfetch_factor,
             min_similarity: c.min_similarity,
+            rerank_enabled: c.rerank_enabled,
+            rerank_model: c.rerank_model.clone(),
         }
     }
 }

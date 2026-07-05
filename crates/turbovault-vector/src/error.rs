@@ -46,4 +46,6 @@ pub enum VectorError {
     Io(#[from] std::io::Error),
     #[error("config error: {0}")]
     Config(String),
+    #[error("rerank error: {0}")]
+    Rerank(String),
 }
