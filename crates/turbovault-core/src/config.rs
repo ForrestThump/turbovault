@@ -132,6 +132,87 @@ impl VaultConfigBuilder {
     }
 }
 
+/// Search engine configuration.
+///
+/// Parsed from the top-level `search:` section of the TurboVault YAML config.
+/// Currently exposes path-based result filtering that is applied server-side
+/// (before results are serialized) across all search tools.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SearchConfig {
+    /// Path prefixes (relative to the vault root) to exclude from every search
+    /// result. Applies to `search`, `advanced_search`, and `semantic_search`.
+    ///
+    /// Matching is path-segment aware, so `"Archive/"` excludes `Archive/note.md`
+    /// and `Archive` itself, but not `Archived/note.md`.
+    pub exclude_paths: Vec<String>,
+}
+
+impl SearchConfig {
+    /// Returns `true` if `relative_path` (relative to the vault root) falls under
+    /// any configured exclusion prefix.
+    pub fn is_path_excluded(&self, relative_path: &str) -> bool {
+        path_has_excluded_prefix(relative_path, &self.exclude_paths)
+    }
+
+    /// Parse the `search:` section from a TurboVault YAML config string.
+    ///
+    /// Unknown fields (other config sections) are ignored, so the full config
+    /// file can be passed in directly.
+    pub fn from_yaml_str(yaml: &str) -> Result<Self> {
+        let file: SearchConfigFile = yaml_serde::from_str(yaml)
+            .map_err(|e| Error::config_error(format!("invalid search configuration: {}", e)))?;
+        Ok(file.search)
+    }
+
+    /// Load the `search:` section from a TurboVault YAML config file.
+    pub async fn from_yaml_file(path: &Path) -> Result<Self> {
+        let content = tokio::fs::read_to_string(path).await.map_err(|e| {
+            Error::config_error(format!(
+                "failed to read search config from {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+        Self::from_yaml_str(&content)
+            .map_err(|e| Error::config_error(format!("{} ({})", e, path.display())))
+    }
+}
+
+/// Wrapper used to extract just the `search:` section from a full config file.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct SearchConfigFile {
+    search: SearchConfig,
+}
+
+/// Normalize a path or exclusion prefix for comparison: convert `\` to `/`,
+/// strip a leading `./`, and trim surrounding slashes and whitespace.
+fn normalize_for_match(value: &str) -> String {
+    let value = value.trim().replace('\\', "/");
+    let trimmed = value.strip_prefix("./").unwrap_or(value.as_str());
+    trimmed.trim_matches('/').to_string()
+}
+
+/// Returns `true` if `path` begins with any of the given `prefixes`.
+///
+/// Matching is path-segment aware: prefix `Archive` matches `Archive/x.md` and
+/// `Archive`, but not `Archived/x.md`. Both the path and prefixes are normalized
+/// (separators unified, leading `./` and surrounding `/` removed) before comparison.
+pub fn path_has_excluded_prefix(path: &str, prefixes: &[String]) -> bool {
+    if prefixes.is_empty() {
+        return false;
+    }
+    let path = normalize_for_match(path);
+    prefixes.iter().any(|prefix| {
+        let prefix = normalize_for_match(prefix);
+        if prefix.is_empty() {
+            return false;
+        }
+        path == prefix || path.starts_with(&format!("{}/", prefix))
+    })
+}
+
 /// Global server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -167,6 +248,9 @@ pub struct ServerConfig {
     // Search settings
     pub full_text_search_enabled: bool,
     pub index_rebuild_interval: u64,
+    /// Search engine configuration (path exclusions, etc.)
+    #[serde(default)]
+    pub search: SearchConfig,
 
     // Multi-vault
     pub multi_vault_enabled: bool,
@@ -207,6 +291,7 @@ impl Default for ServerConfig {
             link_similarity_threshold: 0.3,
             full_text_search_enabled: true,
             index_rebuild_interval: 3600,
+            search: SearchConfig::default(),
             multi_vault_enabled: false,
             metrics_enabled: false,
             debug_mode: false,
@@ -314,5 +399,63 @@ mod tests {
         let mut config = ServerConfig::new();
         config.vaults.clear();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_path_exclusion_prefix_matching() {
+        let prefixes = vec!["Archive/".to_string(), ".trash".to_string()];
+
+        // Under an excluded folder
+        assert!(path_has_excluded_prefix("Archive/2023/note.md", &prefixes));
+        assert!(path_has_excluded_prefix(".trash/deleted.md", &prefixes));
+        // The folder itself
+        assert!(path_has_excluded_prefix("Archive", &prefixes));
+        // Not excluded — similar prefix but different segment
+        assert!(!path_has_excluded_prefix("Archived/note.md", &prefixes));
+        assert!(!path_has_excluded_prefix("Projects/note.md", &prefixes));
+        // Windows separators and leading ./ are normalized
+        assert!(path_has_excluded_prefix("./Archive\\sub\\note.md", &prefixes));
+    }
+
+    #[test]
+    fn test_path_exclusion_empty_prefixes() {
+        assert!(!path_has_excluded_prefix("Archive/note.md", &[]));
+    }
+
+    #[test]
+    fn test_search_config_from_yaml_str() {
+        let yaml = r#"
+search:
+  exclude_paths:
+    - "Archive/"
+    - ".trash/"
+"#;
+        let cfg = SearchConfig::from_yaml_str(yaml).unwrap();
+        assert_eq!(cfg.exclude_paths, vec!["Archive/", ".trash/"]);
+        assert!(cfg.is_path_excluded("Archive/old.md"));
+        assert!(!cfg.is_path_excluded("Notes/today.md"));
+    }
+
+    #[test]
+    fn test_search_config_yaml_ignores_other_sections() {
+        // A full-config file should parse fine, ignoring non-search sections.
+        let yaml = r#"
+observability:
+  log_level: info
+search:
+  exclude_paths:
+    - "private/"
+tool_visibility:
+  disabled:
+    - delete_note
+"#;
+        let cfg = SearchConfig::from_yaml_str(yaml).unwrap();
+        assert_eq!(cfg.exclude_paths, vec!["private/"]);
+    }
+
+    #[test]
+    fn test_search_config_defaults_when_absent() {
+        let cfg = SearchConfig::from_yaml_str("observability:\n  log_level: info\n").unwrap();
+        assert!(cfg.exclude_paths.is_empty());
     }
 }

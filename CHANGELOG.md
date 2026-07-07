@@ -5,6 +5,12 @@ All notable changes to TurboVault will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Server-side search path exclusions**: New `search.exclude_paths` config option filters notes by path prefix (relative to the vault root) across all search tools — `search`, `advanced_search`, and `semantic_search`. Filtering happens server-side before results are serialized. Matching is path-segment aware (`"Archive/"` excludes `Archive/2023/x.md` but not `Archived/x.md`). The `advanced_search` tool's `exclude_paths` parameter is additive with the config list. Adds `turbovault_core::SearchConfig` and `SearchEngine::with_exclusions` / `SimilarityEngine::with_exclusions`.
+
 ## [1.5.0] - 2026-05-01
 
 ### Added

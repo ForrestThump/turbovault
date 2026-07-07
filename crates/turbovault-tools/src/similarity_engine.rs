@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use turbovault_core::path_has_excluded_prefix;
 use turbovault_core::prelude::*;
 use turbovault_parser::to_plain_text;
 use turbovault_vault::VaultManager;
@@ -42,11 +43,25 @@ pub struct SimilarityEngine {
     idf: HashMap<String, f64>,
     #[allow(dead_code)]
     doc_count: usize,
+    /// Path prefixes (relative to vault root) excluded server-side from results.
+    /// Sourced from the `search.exclude_paths` config.
+    config_exclude_paths: Vec<String>,
 }
 
 impl SimilarityEngine {
     /// Build TF-IDF vectors for all vault documents
     pub async fn new(manager: Arc<VaultManager>) -> Result<Self> {
+        Self::with_exclusions(manager, Vec::new()).await
+    }
+
+    /// Build TF-IDF vectors with a set of always-on path exclusions.
+    ///
+    /// `config_exclude_paths` are path prefixes (relative to the vault root) that
+    /// are filtered out of semantic search results before serialization.
+    pub async fn with_exclusions(
+        manager: Arc<VaultManager>,
+        config_exclude_paths: Vec<String>,
+    ) -> Result<Self> {
         let files = manager.scan_vault().await?;
         let vault_path = manager.vault_path().clone();
         let doc_count = files.len().max(1);
@@ -143,6 +158,7 @@ impl SimilarityEngine {
             documents,
             idf,
             doc_count,
+            config_exclude_paths,
         })
     }
 
@@ -206,6 +222,14 @@ impl SimilarityEngine {
             // Skip the query note itself
             if let Some(excl) = exclude_path
                 && doc.path.to_string_lossy() == excl
+            {
+                continue;
+            }
+
+            // Skip notes under a configured server-side exclusion prefix
+            // (search.exclude_paths). Paths are already relative to the vault root.
+            if !self.config_exclude_paths.is_empty()
+                && path_has_excluded_prefix(&doc.path.to_string_lossy(), &self.config_exclude_paths)
             {
                 continue;
             }

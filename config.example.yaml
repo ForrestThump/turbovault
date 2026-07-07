@@ -170,6 +170,17 @@ search:
   # Fuzzy search edit distance (1-2 recommended)
   # fuzzy_distance: 1
 
+  # Path-based result filtering (server-side)
+  # Any note whose path (relative to the vault root) begins with one of these
+  # prefixes is excluded from ALL search tools: search, advanced_search, and
+  # semantic_search. Filtering happens server-side before results are returned.
+  # Matching is path-segment aware, so "Archive/" excludes "Archive/2023/x.md"
+  # but not "Archived/x.md". The advanced_search tool's own exclude_paths
+  # parameter is additive with this list.
+  exclude_paths:
+    - "Archive/"
+    - ".trash/"
+
 # ------------------------------------------------------------------------------
 # LINK GRAPH CONFIGURATION (Advanced)
 # ------------------------------------------------------------------------------

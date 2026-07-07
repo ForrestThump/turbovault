@@ -102,7 +102,7 @@ pub use validation::{
 
 /// Re-export commonly used types
 pub mod prelude {
-    pub use crate::config::{ServerConfig, VaultConfig};
+    pub use crate::config::{SearchConfig, ServerConfig, VaultConfig};
     pub use crate::error::{Error, Result};
     pub use crate::metrics::{Counter, Histogram, MetricsContext};
     pub use crate::models::{

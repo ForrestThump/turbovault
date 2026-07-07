@@ -162,8 +162,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Create vault-agnostic server instance (no vault required at startup)
-    let server =
-        ObsidianMcpServer::new().map_err(|e| format!("Failed to create MCP server: {}", e))?;
+    let search_config = load_search_config(&args).await?;
+    if !search_config.exclude_paths.is_empty() {
+        log::info!(
+            "Search path exclusions configured: {:?}",
+            search_config.exclude_paths
+        );
+    }
+    let server = ObsidianMcpServer::new()
+        .map_err(|e| format!("Failed to create MCP server: {}", e))?
+        .with_search_exclude_paths(search_config.exclude_paths);
 
     log::info!("MCP Server created (vault-agnostic mode)");
 
@@ -464,4 +472,24 @@ async fn load_tool_visibility(
     });
 
     Ok(settings)
+}
+
+/// Load the `search:` section (path exclusions) from the TurboVault YAML config.
+///
+/// Uses the explicit `--config` path if provided, otherwise falls back to the
+/// default config location. Returns defaults when no config file exists.
+async fn load_search_config(
+    args: &Args,
+) -> Result<turbovault_core::SearchConfig, Box<dyn std::error::Error>> {
+    let path = args
+        .config
+        .clone()
+        .or_else(|| default_config_path().filter(|path| path.exists()));
+
+    match path {
+        Some(path) => turbovault_core::SearchConfig::from_yaml_file(&path)
+            .await
+            .map_err(|e| format!("failed to load search config: {}", e).into()),
+        None => Ok(turbovault_core::SearchConfig::default()),
+    }
 }

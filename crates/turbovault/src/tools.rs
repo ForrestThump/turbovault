@@ -177,6 +177,10 @@ pub struct ObsidianMcpServer {
     similarity_engines: Arc<RwLock<HashMap<String, Arc<SimilarityEngine>>>>,
     /// Search engines per vault (keyed by vault name, lazy-initialized)
     search_engines: Arc<RwLock<HashMap<String, Arc<SearchEngine>>>>,
+    /// Path prefixes excluded server-side from all search results
+    /// (from `search.exclude_paths` in the config). Applied to search,
+    /// advanced_search, and semantic_search.
+    search_exclude_paths: Arc<Vec<String>>,
 }
 
 impl ObsidianMcpServer {
@@ -195,7 +199,17 @@ impl ObsidianMcpServer {
             snapshot_stores: Arc::new(RwLock::new(HashMap::new())),
             similarity_engines: Arc::new(RwLock::new(HashMap::new())),
             search_engines: Arc::new(RwLock::new(HashMap::new())),
+            search_exclude_paths: Arc::new(Vec::new()),
         })
+    }
+
+    /// Set the server-side search path exclusions (from `search.exclude_paths`).
+    ///
+    /// These prefixes are filtered out of every search result and are additive
+    /// with any per-request `exclude_paths` passed to `advanced_search`.
+    pub fn with_search_exclude_paths(mut self, exclude_paths: Vec<String>) -> Self {
+        self.search_exclude_paths = Arc::new(exclude_paths);
+        self
     }
 
     /// Initialize the persistent cache (should be called after server creation)
@@ -358,9 +372,12 @@ impl ObsidianMcpServer {
         }
 
         // Build new engine (this indexes the entire vault via tantivy)
-        let engine = SearchEngine::new(manager.clone())
-            .await
-            .map_err(|e| McpError::internal(format!("Failed to build search engine: {}", e)))?;
+        let engine = SearchEngine::with_exclusions(
+            manager.clone(),
+            self.search_exclude_paths.to_vec(),
+        )
+        .await
+        .map_err(|e| McpError::internal(format!("Failed to build search engine: {}", e)))?;
         let engine = Arc::new(engine);
 
         // Cache it — double-check to handle concurrent callers
@@ -389,9 +406,12 @@ impl ObsidianMcpServer {
 
         // Build new engine
         let manager = self.get_active_vault_manager().await?;
-        let engine = SimilarityEngine::new(manager)
-            .await
-            .map_err(|e| McpError::internal(format!("Failed to build similarity engine: {}", e)))?;
+        let engine = SimilarityEngine::with_exclusions(
+            manager,
+            self.search_exclude_paths.to_vec(),
+        )
+        .await
+        .map_err(|e| McpError::internal(format!("Failed to build similarity engine: {}", e)))?;
         let engine = Arc::new(engine);
 
         {
@@ -1166,7 +1186,7 @@ impl ObsidianMcpServer {
     /// Advanced search with filters
     #[tool(
         description = "Enhanced search with tag, frontmatter, and path filters returning ranked results with match context",
-        usage = "Use when search() returns too many results or you need filtered results. Supports tag filters, frontmatter key-value filters (AND logic), path exclusions, and custom result limits",
+        usage = "Use when search() returns too many results or you need filtered results. Supports tag filters, frontmatter key-value filters (AND logic), path exclusions, and custom result limits. Any exclude_paths given here are additive with the server's search.exclude_paths config",
         performance = "Fast to Moderate - uses Tantivy search engine with BM25 ranking, additional filtering adds minimal overhead",
         related = ["search", "search_by_frontmatter", "query_metadata", "find_notes_from_template"],
         examples = [

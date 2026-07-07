@@ -15,6 +15,7 @@ use tantivy::query::QueryParser;
 use tantivy::schema::*;
 use tantivy::{Index, ReloadPolicy, TantivyDocument, doc};
 use tracing::instrument;
+use turbovault_core::path_has_excluded_prefix;
 use turbovault_core::prelude::*;
 use turbovault_parser::to_plain_text;
 use turbovault_vault::VaultManager;
@@ -122,11 +123,26 @@ pub struct SearchEngine {
     field_title: Field,
     field_content: Field,
     field_tags: Field,
+    /// Path prefixes (relative to vault root) excluded server-side for every query.
+    /// Sourced from the `search.exclude_paths` config; always applied on top of
+    /// any per-request `exclude_paths` filter.
+    config_exclude_paths: Vec<String>,
 }
 
 impl SearchEngine {
     /// Create new search engine and index all vault files
     pub async fn new(manager: Arc<VaultManager>) -> Result<Self> {
+        Self::with_exclusions(manager, Vec::new()).await
+    }
+
+    /// Create a new search engine with a set of always-on path exclusions.
+    ///
+    /// `config_exclude_paths` are path prefixes (relative to the vault root) that
+    /// are filtered out of every search result before serialization.
+    pub async fn with_exclusions(
+        manager: Arc<VaultManager>,
+        config_exclude_paths: Vec<String>,
+    ) -> Result<Self> {
         // Define schema: fields to index
         let mut schema_builder = Schema::builder();
         schema_builder.add_text_field("path", TEXT | STORED);
@@ -222,6 +238,7 @@ impl SearchEngine {
             field_title,
             field_content,
             field_tags,
+            config_exclude_paths,
         })
     }
 
@@ -326,13 +343,28 @@ impl SearchQuery {
             .parse_query(&query_str)
             .map_err(|e| Error::config_error(format!("Failed to parse query: {}", e)))?;
 
+        // Determine whether any path exclusions are active. When they are, over-fetch
+        // candidates so filtered-out documents don't starve the requested result count.
+        let has_exclusions = !engine.config_exclude_paths.is_empty()
+            || filter
+                .exclude_paths
+                .as_ref()
+                .is_some_and(|p| !p.is_empty());
+        let candidate_limit = if has_exclusions {
+            (limit * 4).max(64)
+        } else {
+            limit * 2
+        };
+
         // Execute search
         let top_docs = searcher
             .search(
                 &query,
-                &TopDocs::with_limit(limit * 2).order_by_score(), // Get extra docs for filtering
+                &TopDocs::with_limit(candidate_limit).order_by_score(), // Get extra docs for filtering
             )
             .map_err(|e| Error::config_error(format!("Search failed: {}", e)))?;
+
+        let vault_root = engine.manager.vault_path();
 
         let mut results = Vec::new();
 
@@ -371,9 +403,29 @@ impl SearchQuery {
                 continue;
             }
 
-            // Apply exclusion filter
+            // Apply path exclusions (server-side, before serialization).
+            //
+            // Two sources are combined additively:
+            //   * `config_exclude_paths` from `search.exclude_paths` (always on).
+            //     These are folder prefixes relative to the vault root, so they
+            //     are matched against the vault-relative path only.
+            //   * `filter.exclude_paths` from the advanced_search tool parameter.
+            //     These may be given as relative or absolute paths (e.g. the
+            //     self-exclusion in `find_related`), so both the relative and the
+            //     raw stored path are tested.
+            //
+            // Matching is path-segment prefix based in all cases.
+            let rel_path = std::path::Path::new(&path)
+                .strip_prefix(vault_root)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.clone());
+
+            if path_has_excluded_prefix(&rel_path, &engine.config_exclude_paths) {
+                continue;
+            }
             if let Some(exclude) = &filter.exclude_paths
-                && exclude.iter().any(|p| path.ends_with(p))
+                && (path_has_excluded_prefix(&rel_path, exclude)
+                    || path_has_excluded_prefix(&path, exclude))
             {
                 continue;
             }
