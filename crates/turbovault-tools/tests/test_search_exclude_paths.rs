@@ -57,12 +57,10 @@ fn paths(results: &[turbovault_tools::SearchResultInfo]) -> Vec<String> {
 #[tokio::test]
 async fn search_excludes_configured_prefixes() {
     let (_temp, manager) = setup_vault().await;
-    let engine = SearchEngine::with_exclusions(
-        manager,
-        vec!["Archive/".to_string(), ".trash/".to_string()],
-    )
-    .await
-    .unwrap();
+    let engine =
+        SearchEngine::with_exclusions(manager, vec!["Archive/".to_string(), ".trash/".to_string()])
+            .await
+            .unwrap();
 
     let results = engine.search("apple orchard").await.unwrap();
     let found = paths(&results);
@@ -135,10 +133,7 @@ async fn semantic_search_excludes_configured_prefixes() {
     .unwrap();
 
     let results = engine.semantic_search("quick brown apple orchard fox", 50);
-    let found: Vec<String> = results
-        .iter()
-        .map(|r| r.path.replace('\\', "/"))
-        .collect();
+    let found: Vec<String> = results.iter().map(|r| r.path.replace('\\', "/")).collect();
 
     assert!(
         !found.iter().any(|p| p.starts_with("Archive/")),
@@ -149,7 +144,9 @@ async fn semantic_search_excludes_configured_prefixes() {
         ".trash/ notes must be excluded from semantic search, got {found:?}"
     );
     assert!(
-        found.iter().any(|p| p.starts_with("Drafts/") || p == "active.md"),
+        found
+            .iter()
+            .any(|p| p.starts_with("Drafts/") || p == "active.md"),
         "non-excluded notes should still rank, got {found:?}"
     );
 }

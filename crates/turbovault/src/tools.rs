@@ -372,12 +372,10 @@ impl ObsidianMcpServer {
         }
 
         // Build new engine (this indexes the entire vault via tantivy)
-        let engine = SearchEngine::with_exclusions(
-            manager.clone(),
-            self.search_exclude_paths.to_vec(),
-        )
-        .await
-        .map_err(|e| McpError::internal(format!("Failed to build search engine: {}", e)))?;
+        let engine =
+            SearchEngine::with_exclusions(manager.clone(), self.search_exclude_paths.to_vec())
+                .await
+                .map_err(|e| McpError::internal(format!("Failed to build search engine: {}", e)))?;
         let engine = Arc::new(engine);
 
         // Cache it — double-check to handle concurrent callers
@@ -406,12 +404,9 @@ impl ObsidianMcpServer {
 
         // Build new engine
         let manager = self.get_active_vault_manager().await?;
-        let engine = SimilarityEngine::with_exclusions(
-            manager,
-            self.search_exclude_paths.to_vec(),
-        )
-        .await
-        .map_err(|e| McpError::internal(format!("Failed to build similarity engine: {}", e)))?;
+        let engine = SimilarityEngine::with_exclusions(manager, self.search_exclude_paths.to_vec())
+            .await
+            .map_err(|e| McpError::internal(format!("Failed to build similarity engine: {}", e)))?;
         let engine = Arc::new(engine);
 
         {

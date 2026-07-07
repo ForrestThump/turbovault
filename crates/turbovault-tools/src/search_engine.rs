@@ -346,10 +346,7 @@ impl SearchQuery {
         // Determine whether any path exclusions are active. When they are, over-fetch
         // candidates so filtered-out documents don't starve the requested result count.
         let has_exclusions = !engine.config_exclude_paths.is_empty()
-            || filter
-                .exclude_paths
-                .as_ref()
-                .is_some_and(|p| !p.is_empty());
+            || filter.exclude_paths.as_ref().is_some_and(|p| !p.is_empty());
         let candidate_limit = if has_exclusions {
             (limit * 4).max(64)
         } else {
@@ -418,7 +415,7 @@ impl SearchQuery {
             let rel_path = std::path::Path::new(&path)
                 .strip_prefix(vault_root)
                 .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.clone());
+                .unwrap_or_else(|_| path.clone());
 
             if path_has_excluded_prefix(&rel_path, &engine.config_exclude_paths) {
                 continue;

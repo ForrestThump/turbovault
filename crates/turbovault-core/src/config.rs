@@ -414,7 +414,10 @@ mod tests {
         assert!(!path_has_excluded_prefix("Archived/note.md", &prefixes));
         assert!(!path_has_excluded_prefix("Projects/note.md", &prefixes));
         // Windows separators and leading ./ are normalized
-        assert!(path_has_excluded_prefix("./Archive\\sub\\note.md", &prefixes));
+        assert!(path_has_excluded_prefix(
+            "./Archive\\sub\\note.md",
+            &prefixes
+        ));
     }
 
     #[test]
