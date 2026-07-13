@@ -1708,6 +1708,142 @@ mod tests {
         );
     }
 
+    /// Moving a note must rewrite wikilinks in *other* notes that reference it,
+    /// so links remain valid after the move (as documented: "Rename/relocate
+    /// with automatic wikilink updates").
+    ///
+    /// Bug: move_file only relocates the file and updates its own graph/cache
+    /// entry — it leaves `[[Projects/Task]]` in referencing notes untouched,
+    /// turning them into broken links.
+    #[tokio::test]
+    async fn test_move_file_updates_wikilinks_in_other_notes() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(temp_dir.path());
+        let manager = VaultManager::new(config).unwrap();
+
+        // The note that will be moved.
+        manager
+            .write_file(Path::new("Projects/Task.md"), "# Task", None)
+            .await
+            .unwrap();
+
+        // A referencing note with a folder-qualified wikilink.
+        manager
+            .write_file(
+                Path::new("Index.md"),
+                "# Index\n\nSee [[Projects/Task]] for details.",
+                None,
+            )
+            .await
+            .unwrap();
+
+        manager.initialize().await.unwrap();
+
+        // Relocate Projects/Task.md -> Archive/Task.md
+        manager
+            .move_file(
+                Path::new("Projects/Task.md"),
+                Path::new("Archive/Task.md"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let index = manager.read_file(Path::new("Index.md")).await.unwrap();
+        assert!(
+            index.contains("[[Archive/Task]]"),
+            "wikilink should be rewritten to the new path, got: {index}"
+        );
+        assert!(
+            !index.contains("[[Projects/Task]]"),
+            "stale wikilink to the old path must not remain, got: {index}"
+        );
+    }
+
+    /// Moving a note must also rewrite relative Markdown links (`[text](path.md)`)
+    /// in other notes that reference it.
+    #[tokio::test]
+    async fn test_move_file_updates_markdown_links_in_other_notes() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(temp_dir.path());
+        let manager = VaultManager::new(config).unwrap();
+
+        manager
+            .write_file(Path::new("Projects/Task.md"), "# Task", None)
+            .await
+            .unwrap();
+
+        manager
+            .write_file(
+                Path::new("Index.md"),
+                "# Index\n\nSee [Task](Projects/Task.md) for details.",
+                None,
+            )
+            .await
+            .unwrap();
+
+        manager.initialize().await.unwrap();
+
+        manager
+            .move_file(
+                Path::new("Projects/Task.md"),
+                Path::new("Archive/Task.md"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let index = manager.read_file(Path::new("Index.md")).await.unwrap();
+        assert!(
+            index.contains("(Archive/Task.md)"),
+            "markdown link should be rewritten to the new path, got: {index}"
+        );
+        assert!(
+            !index.contains("(Projects/Task.md)"),
+            "stale markdown link to the old path must not remain, got: {index}"
+        );
+    }
+
+    /// Renaming a note (same directory, new file name) must rewrite wikilinks
+    /// that use the old name in other notes.
+    #[tokio::test]
+    async fn test_rename_file_updates_wikilinks_in_other_notes() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = create_test_config(temp_dir.path());
+        let manager = VaultManager::new(config).unwrap();
+
+        manager
+            .write_file(Path::new("OldName.md"), "# Old Name", None)
+            .await
+            .unwrap();
+
+        manager
+            .write_file(
+                Path::new("Index.md"),
+                "# Index\n\nLink to [[OldName]] here.",
+                None,
+            )
+            .await
+            .unwrap();
+
+        manager.initialize().await.unwrap();
+
+        manager
+            .move_file(Path::new("OldName.md"), Path::new("NewName.md"), None)
+            .await
+            .unwrap();
+
+        let index = manager.read_file(Path::new("Index.md")).await.unwrap();
+        assert!(
+            index.contains("[[NewName]]"),
+            "wikilink should be rewritten to the new name, got: {index}"
+        );
+        assert!(
+            !index.contains("[[OldName]]"),
+            "stale wikilink to the old name must not remain, got: {index}"
+        );
+    }
+
     /// delete_file() must evict the entry from the cache immediately.
     #[tokio::test]
     async fn test_delete_file_evicts_from_cache() {

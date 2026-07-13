@@ -145,6 +145,106 @@ async fn test_move_file_with_directory_creation() {
     assert!(result.is_ok());
 }
 
+// ==================== move_file Link-Update Tests ====================
+//
+// move_note (which delegates to FileTools::move_file) is documented as
+// "Rename/relocate with automatic wikilink updates". Moving or renaming a note
+// must therefore rewrite links pointing at it inside *other* notes, otherwise
+// those links silently break.
+
+#[tokio::test]
+async fn test_move_file_updates_wikilinks_in_other_notes() {
+    let (_temp_dir, manager) = setup_test_vault().await;
+    let tools = FileTools::new(manager);
+
+    // Note that will be relocated.
+    tools
+        .write_file("Projects/Task.md", "# Task")
+        .await
+        .expect("write task note");
+
+    // Note referencing it via a folder-qualified wikilink.
+    tools
+        .write_file("Index.md", "# Index\n\nSee [[Projects/Task]] for details.")
+        .await
+        .expect("write index note");
+
+    // Projects/Task.md -> Archive/Task.md
+    let result = tools.move_file("Projects/Task.md", "Archive/Task.md").await;
+    assert!(result.is_ok());
+
+    let index = tools.read_file("Index.md").await.expect("read index note");
+    assert!(
+        index.contains("[[Archive/Task]]"),
+        "wikilink should be rewritten to the new path, got: {index}"
+    );
+    assert!(
+        !index.contains("[[Projects/Task]]"),
+        "stale wikilink to the old path must not remain, got: {index}"
+    );
+}
+
+#[tokio::test]
+async fn test_move_file_updates_markdown_links_in_other_notes() {
+    let (_temp_dir, manager) = setup_test_vault().await;
+    let tools = FileTools::new(manager);
+
+    tools
+        .write_file("Projects/Task.md", "# Task")
+        .await
+        .expect("write task note");
+
+    tools
+        .write_file(
+            "Index.md",
+            "# Index\n\nSee [Task](Projects/Task.md) for details.",
+        )
+        .await
+        .expect("write index note");
+
+    let result = tools.move_file("Projects/Task.md", "Archive/Task.md").await;
+    assert!(result.is_ok());
+
+    let index = tools.read_file("Index.md").await.expect("read index note");
+    assert!(
+        index.contains("(Archive/Task.md)"),
+        "markdown link should be rewritten to the new path, got: {index}"
+    );
+    assert!(
+        !index.contains("(Projects/Task.md)"),
+        "stale markdown link to the old path must not remain, got: {index}"
+    );
+}
+
+#[tokio::test]
+async fn test_rename_file_updates_wikilinks_in_other_notes() {
+    let (_temp_dir, manager) = setup_test_vault().await;
+    let tools = FileTools::new(manager);
+
+    tools
+        .write_file("OldName.md", "# Old Name")
+        .await
+        .expect("write note");
+
+    tools
+        .write_file("Index.md", "# Index\n\nLink to [[OldName]] here.")
+        .await
+        .expect("write index note");
+
+    let result = tools.move_file("OldName.md", "NewName.md").await;
+    assert!(result.is_ok());
+
+    let index = tools.read_file("Index.md").await.expect("read index note");
+    assert!(
+        index.contains("[[NewName]]"),
+        "wikilink should be rewritten to the new name, got: {index}"
+    );
+    assert!(
+        !index.contains("[[OldName]]"),
+        "stale wikilink to the old name must not remain, got: {index}"
+    );
+}
+
 #[tokio::test]
 async fn test_copy_file_success() {
     let (temp_dir, manager) = setup_test_vault().await;
