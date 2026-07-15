@@ -240,7 +240,11 @@ impl LinkGraph {
         for link in &file.links {
             if matches!(
                 link.type_,
-                LinkType::WikiLink | LinkType::Embed | LinkType::HeadingRef | LinkType::BlockRef
+                LinkType::WikiLink
+                    | LinkType::Embed
+                    | LinkType::HeadingRef
+                    | LinkType::BlockRef
+                    | LinkType::MarkdownLink
             ) {
                 // Skip same-document anchors like [[#Heading]]
                 let clean_target = link.target.split('#').next().unwrap_or("").trim();
@@ -268,9 +272,12 @@ impl LinkGraph {
     /// Resolve a wikilink target to a file path and node index.
     /// Resolution is case-insensitive to match Obsidian's behaviour.
     fn resolve_link(&self, target: &str) -> Option<NodeIndex> {
-        // Remove block/heading references
         let clean_target = target.split('#').next()?.trim();
-        let clean_lower = clean_target.to_lowercase();
+        let clean_lower = clean_target
+            .to_lowercase()
+            .strip_suffix(".md")
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| clean_target.to_lowercase());
 
         // Try direct stem match (case-insensitive, first-found wins)
         if let Some(indices) = self.file_index.get(&clean_lower)
@@ -287,10 +294,10 @@ impl LinkGraph {
         }
 
         // Try path-suffix index for folder-qualified links like [[Folder/Note]]
-        let target_parts: Vec<String> = clean_target
+        let target_parts: Vec<String> = clean_lower
             .split('/')
             .filter(|p| !p.is_empty())
-            .map(|p| p.to_lowercase())
+            .map(|p| p.to_string())
             .collect();
         if target_parts.is_empty() {
             return None;

@@ -489,6 +489,80 @@ impl VaultManager {
             Err(e) => return Err(Error::io(e)),
         }
 
+        // Capture backlinks before graph is modified so we can update
+        // wikilinks and markdown links in referencing notes.
+        let backlinks = {
+            let graph = self.link_graph.read().await;
+            graph.backlinks(&from_path).unwrap_or_default()
+        };
+
+        // Rewrite links in each referencing note so they point to the new path.
+        // We write directly to disk (not via write_file) to avoid graph/cache
+        // interference while the graph is being rebuilt below.
+        let old_str = from.to_string_lossy().replace('\\', "/");
+        let new_str = to.to_string_lossy().replace('\\', "/");
+        let old_wiki = old_str
+            .strip_suffix(".md")
+            .unwrap_or(&old_str);
+        let new_wiki = new_str
+            .strip_suffix(".md")
+            .unwrap_or(&new_str);
+
+        for (source_path, links) in &backlinks {
+            let mut content = match tokio::fs::read_to_string(source_path).await {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+
+            for link in links {
+                let off = link.position.offset;
+                let len = link.position.length;
+
+                if off + len > content.len() {
+                    continue;
+                }
+
+                let old_text = &content[off..off + len];
+                let new_text = match link.type_ {
+                    LinkType::WikiLink | LinkType::HeadingRef | LinkType::BlockRef => {
+                        old_text.replace(old_wiki, new_wiki)
+                    }
+                    LinkType::MarkdownLink => {
+                        old_text.replace(&old_str, &new_str)
+                    }
+                    _ => continue,
+                };
+
+                if old_text != new_text {
+                    replacements.push((off, len, new_text));
+                }
+            }
+
+            if replacements.is_empty() {
+                continue;
+            }
+
+            // Apply from end to start so earlier offsets stay valid.
+            replacements.sort_by_key(|(off, _, _)| std::cmp::Reverse(*off));
+            let mut bytes = content.into_bytes();
+            for (off, len, new_text) in &replacements {
+                let _: Vec<_> =
+                    bytes.splice(*off..*off + *len, new_text.bytes()).collect();
+            }
+            content = String::from_utf8(bytes)
+                .map_err(|e| Error::other(format!("UTF-8 error: {}", e)))?;
+
+            if let Err(e) = tokio::fs::write(source_path, &content).await {
+                log::warn!(
+                    "Failed to update backlink file {}: {}",
+                    source_path.display(),
+                    e
+                );
+            }
+        }
+
         // Update graph: remove old, add new
         {
             let mut graph = self.link_graph.write().await;
@@ -524,6 +598,24 @@ impl VaultManager {
             }
             Err(e) => {
                 log::warn!("Failed to parse {} after move: {}", to_path.display(), e);
+            }
+        }
+
+        // Re-parse referenced notes so the graph picks up the rewritten links.
+        for (source_path, _) in &backlinks {
+            if let Ok(reparsed) = tokio::fs::read_to_string(source_path).await {
+                if let Ok(vf) = self.parser.parse_file(source_path, &reparsed) {
+                    let mut graph = self.link_graph.write().await;
+                    if let Err(e) = graph.update_links(&vf) {
+                        log::warn!(
+                            "Failed to update links for backlink {}: {}",
+                            source_path.display(),
+                            e
+                        );
+                    }
+                    drop(graph);
+                    self.insert_cache_entry(source_path.clone(), vf).await;
+                }
             }
         }
 

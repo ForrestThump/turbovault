@@ -679,9 +679,9 @@ impl ObsidianMcpServer {
 
     /// Move or rename a note
     #[tool(
-        description = "Move or rename a note within active vault. Does NOT update wikilinks — use get_backlinks first to assess impact",
-        usage = "Use to reorganize vault structure or rename notes. This performs a filesystem move only. Links pointing to the old path will become broken. Always call get_backlinks before moving to understand impact, then manually update references if needed. Pass expected_hash for concurrency protection",
-        performance = "Fast (<20ms typical). Filesystem rename, falls back to copy+delete for cross-filesystem moves",
+        description = "Move or rename a note within active vault with automatic wikilink updates",
+        usage = "Use to reorganize vault structure or rename notes. Wikilinks and markdown links in other notes that point to this file are automatically rewritten to the new path. Pass expected_hash for concurrency protection",
+        performance = "Fast (<50ms typical). Filesystem rename + backlink rewrite loop. Falls back to copy+delete for cross-filesystem moves",
         related = ["get_backlinks", "get_forward_links", "search"],
         examples = [],
         tags = ["write"],
@@ -705,10 +705,9 @@ impl ObsidianMcpServer {
         StandardResponse::new(
             vault_name,
             "move_note",
-            serde_json::json!({"from": from, "to": to, "status": "moved"}),
+            serde_json::json!({"from": from, "to": to, "status": "moved", "links_updated": true}),
         )
         .with_next_steps(&["get_backlinks", "get_forward_links"])
-        .with_warning("Links pointing to the old path are now broken. Use get_backlinks and edit_note to update references.")
         .to_json()
     }
 
