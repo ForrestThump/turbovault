@@ -85,6 +85,9 @@ criterion = { workspace = true, features = ["async_tokio", "html_reports"] }
 # turbovault-6fo.18 e2e tests: direct git2 inspection (HEAD, commit
 # messages, external commits) of substrate output.
 git2 = { workspace = true }
+# Direct substrate access (Changeset builder) for the write-coherence gap
+# tests that exercise the substrate alongside the legacy VaultManager path.
+turbovault-git = { workspace = true }
 # turbovault-6fo.18: serialize e2e tests because libgit2's process-wide
 # init + parallel ObsidianMcpServer setup is flaky (~25% failure rate
 # on a hot machine when tests run in parallel; isolating them removes

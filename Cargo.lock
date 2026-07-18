@@ -5205,6 +5205,7 @@ dependencies = [
  "turbomcp-types",
  "turbovault-audit",
  "turbovault-core",
+ "turbovault-git",
  "turbovault-tools",
  "turbovault-vault",
  "uuid",
