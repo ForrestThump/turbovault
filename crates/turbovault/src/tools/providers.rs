@@ -1133,6 +1133,101 @@ mod tests {
         );
     }
 
+    /// Live test: exercise `read_config` (and the global filter it resolves)
+    /// end-to-end against a real Obsidian vault.
+    ///
+    /// Fails closed: it is ignored by default, gated on `TURBOVAULT_LIVE_VAULT`,
+    /// and skips (rather than fails) unless that vault actually has an Obsidian
+    /// Tasks `data.json` to validate against — so there is never a spurious
+    /// failure when there is nothing real to check, and no machine-specific path
+    /// or private content lives in the suite. Run with:
+    ///   TURBOVAULT_LIVE_VAULT="/path/to/vault" \
+    ///     cargo test -p turbovault --features tasks --lib live_tasks \
+    ///     -- --ignored --nocapture
+    #[cfg(feature = "tasks")]
+    #[tokio::test]
+    #[ignore = "live: set TURBOVAULT_LIVE_VAULT to a real Obsidian vault"]
+    async fn live_tasks_against_real_obsidian_vault() {
+        use turbovault_core::VaultConfig;
+
+        let Ok(vault_path) = std::env::var("TURBOVAULT_LIVE_VAULT") else {
+            eprintln!("SKIP: set TURBOVAULT_LIVE_VAULT to a real vault path");
+            return;
+        };
+        // No real Tasks settings to read => nothing to validate => skip, don't fail.
+        let data_json = std::path::Path::new(&vault_path)
+            .join(".obsidian/plugins/obsidian-tasks-plugin/data.json");
+        if !data_json.exists() {
+            eprintln!("SKIP: {vault_path} has no Obsidian Tasks data.json");
+            return;
+        }
+
+        let server = ObsidianMcpServer::new_with_plugins(vec![Arc::new(
+            turbovault_plugin_tasks::TasksPlugin,
+        )])
+        .expect("plugin composition");
+        let vault_config = VaultConfig::builder("live", &vault_path)
+            .build()
+            .expect("vault config");
+        server
+            .multi_vault()
+            .add_vault(vault_config)
+            .await
+            .expect("register vault");
+        server
+            .multi_vault()
+            .set_active_vault("live")
+            .await
+            .expect("select vault");
+
+        let ctx = RequestContext::with_id("live");
+
+        // 1. read_config: the module must resolve settings from the real file.
+        let resolved = structured(
+            server
+                .call_tool("tasks_config", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_config"),
+        );
+        eprintln!("\n--- tasks_config against {vault_path} ---\n{resolved:#}\n");
+        assert_eq!(
+            resolved["source"], "obsidian-data",
+            "read_config must read the vault's real Tasks data.json"
+        );
+
+        // 2. Global filter: report the count (informational — a vault whose tasks
+        //    are all tagged would legitimately show no reduction, so "the count
+        //    shrank" is NOT a sound criterion). The sound, content-independent
+        //    invariant is that every task the filter *returns* carries the filter
+        //    tag — unless the config strips it from the rendered tags.
+        let listed = structured(
+            server
+                .call_tool("tasks_list", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_list"),
+        );
+        let count = listed["count"].as_u64().unwrap_or(0);
+        let global_filter = resolved["global_filter"].as_str().unwrap_or("");
+        eprintln!("tasks_list: {count} tasks match global filter {global_filter:?}");
+
+        let strips_tag = resolved["remove_global_filter"].as_bool().unwrap_or(false);
+        if let Some(tag) = global_filter.strip_prefix('#').filter(|_| !strips_tag) {
+            let tasks = listed["tasks"].as_array().cloned().unwrap_or_default();
+            for task in &tasks {
+                let carries_tag = task["tags"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .any(|value| value.eq_ignore_ascii_case(tag));
+                assert!(
+                    carries_tag,
+                    "a filtered task is missing the global-filter tag #{tag}"
+                );
+            }
+        }
+    }
+
     #[cfg(feature = "plugin-api")]
     #[test]
     fn duplicate_plugin_namespaces_are_rejected_before_serving() {
