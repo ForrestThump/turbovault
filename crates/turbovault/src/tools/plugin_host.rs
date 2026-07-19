@@ -96,6 +96,31 @@ impl VaultHost for PluginVaultHost {
         Ok(notes)
     }
 
+    async fn list_notes_meta(&self) -> PluginResult<Vec<(String, i64)>> {
+        let manager = self
+            .core
+            .get_active_vault_manager()
+            .await
+            .map_err(map_host_error)?;
+        let mut out = manager
+            .scan_vault()
+            .await
+            .map_err(map_core_error)?
+            .iter()
+            .map(|path| {
+                let mtime = std::fs::metadata(path)
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|dur| dur.as_millis() as i64)
+                    .unwrap_or(0);
+                (manager.relative_path(path), mtime)
+            })
+            .collect::<Vec<_>>();
+        out.sort();
+        Ok(out)
+    }
+
     async fn read_note(&self, path: &str) -> PluginResult<NoteSnapshot> {
         let (vault, manager) = self.core.get_vault_pair().await.map_err(map_host_error)?;
         let content = FileTools::new(manager)

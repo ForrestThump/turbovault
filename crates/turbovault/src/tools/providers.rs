@@ -363,6 +363,66 @@ impl ObsidianMcpServer {
         self.hooks.clone()
     }
 
+    /// Start a filesystem watcher over the active vault and republish its changes
+    /// onto the hook bus, so event-driven modules see **all** note changes —
+    /// external Obsidian edits and core-tool writes alike, not just plugin writes.
+    ///
+    /// The watcher observes the filesystem, so one bridge covers every change
+    /// source. Attribution is `ExternalOrUnknown`; the module reconciles by mtime
+    /// for correctness if events are dropped.
+    #[cfg(feature = "plugin-api")]
+    pub async fn start_vault_watch(&self) -> Result<()> {
+        use turbovault_plugin_api::{EventAttribution, HookEvent};
+        use turbovault_vault::{VaultEvent, VaultWatcher, WatcherConfig};
+
+        let vault = self
+            .core
+            .get_active_vault_name()
+            .await
+            .map_err(|error| anyhow!("no active vault to watch: {error}"))?;
+        let manager = self
+            .core
+            .get_active_vault_manager()
+            .await
+            .map_err(|error| anyhow!("no active vault manager: {error}"))?;
+        let root = manager.vault_path().clone();
+
+        let (mut watcher, mut rx) = VaultWatcher::new(root, WatcherConfig::default())
+            .map_err(|error| anyhow!("failed to create watcher: {error}"))?;
+        watcher
+            .start()
+            .await
+            .map_err(|error| anyhow!("failed to start watcher: {error}"))?;
+
+        let hooks = self.hooks.clone();
+        tokio::spawn(async move {
+            // Hold the watcher so the underlying notify handle stays alive.
+            let _watcher = watcher;
+            while let Some(event) = rx.recv().await {
+                if !event.is_markdown() {
+                    continue;
+                }
+                let hook = match event {
+                    VaultEvent::FileCreated(path) => HookEvent::FileCreated {
+                        path: manager.relative_path(&path),
+                    },
+                    VaultEvent::FileModified(path) => HookEvent::FileModified {
+                        path: manager.relative_path(&path),
+                    },
+                    VaultEvent::FileDeleted(path) => HookEvent::FileDeleted {
+                        path: manager.relative_path(&path),
+                    },
+                    VaultEvent::FileRenamed(from, to) => HookEvent::FileRenamed {
+                        from: manager.relative_path(&from),
+                        to: manager.relative_path(&to),
+                    },
+                };
+                let _ = hooks.publish(&vault, hook, None, EventAttribution::ExternalOrUnknown);
+            }
+        });
+        Ok(())
+    }
+
     /// Initialize the persistent cache after server creation.
     pub async fn init_cache(&self) -> Result<()> {
         self.core.init_cache().await
@@ -822,6 +882,50 @@ mod tests {
             .await
             .expect_err("stale CAS write must fail");
         assert_eq!(stale.jsonrpc_code(), -32600);
+    }
+
+    #[cfg(feature = "plugin-api")]
+    #[tokio::test]
+    async fn vault_watcher_republishes_external_edits_to_the_hook_bus() {
+        use turbovault_core::VaultConfig;
+        use turbovault_plugin_api::HookEvent;
+
+        let temp = tempfile::TempDir::new().expect("temp vault");
+        let server = ObsidianMcpServer::new().expect("server");
+        let config = VaultConfig::builder("watch-test", temp.path())
+            .build()
+            .expect("vault config");
+        server
+            .multi_vault()
+            .add_vault(config)
+            .await
+            .expect("register vault");
+        server
+            .multi_vault()
+            .set_active_vault("watch-test")
+            .await
+            .expect("select vault");
+
+        let mut events = server.hook_bus().subscribe().expect("hook subscription");
+        server.start_vault_watch().await.expect("start watch");
+
+        // An external edit (write straight to disk, bypassing the note APIs) must
+        // still reach the bus via the filesystem watcher.
+        tokio::fs::write(temp.path().join("external.md"), "# hello")
+            .await
+            .expect("external write");
+
+        let envelope = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("a watcher event within 5s")
+            .expect("hook event");
+        assert_eq!(envelope.vault, "watch-test");
+        match envelope.event {
+            HookEvent::FileCreated { path } | HookEvent::FileModified { path } => {
+                assert!(path.contains("external.md"), "unexpected path: {path}");
+            }
+            other => panic!("expected create/modify, got {other:?}"),
+        }
     }
 
     #[cfg(feature = "plugin-api")]

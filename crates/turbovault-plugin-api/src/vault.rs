@@ -79,6 +79,20 @@ pub trait VaultHost: Send + Sync {
     /// List markdown note paths in the active vault.
     async fn list_notes(&self) -> PluginResult<Vec<String>>;
 
+    /// List note paths paired with their modification time (ms since epoch).
+    ///
+    /// The cheap change-detection primitive: a module compares these against its
+    /// own last-seen mtimes to find which notes to re-read, without reading every
+    /// note. Default derives mtimes as `0` (host declines); real hosts stat.
+    async fn list_notes_meta(&self) -> PluginResult<Vec<(String, i64)>> {
+        Ok(self
+            .list_notes()
+            .await?
+            .into_iter()
+            .map(|path| (path, 0))
+            .collect())
+    }
+
     /// Read a complete note and its opaque version.
     async fn read_note(&self, path: &str) -> PluginResult<NoteSnapshot>;
 
@@ -146,6 +160,11 @@ impl VaultApi {
     /// List markdown note paths in the active vault.
     pub async fn list_notes(&self) -> PluginResult<Vec<String>> {
         self.host.list_notes().await
+    }
+
+    /// List note paths paired with their modification time (ms since epoch).
+    pub async fn list_notes_meta(&self) -> PluginResult<Vec<(String, i64)>> {
+        self.host.list_notes_meta().await
     }
 
     /// Read a complete note and its opaque version.
