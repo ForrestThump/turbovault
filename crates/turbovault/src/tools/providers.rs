@@ -966,6 +966,52 @@ mod tests {
             "- [ ] write report ⏫ 📅 2099-01-01 #work",
             "priority emoji is inserted and the line is re-rendered canonically"
         );
+
+        // add_tags edits the tag set incrementally (keeping existing tags).
+        let tagged = structured(
+            server
+                .call_tool(
+                    "tasks_update",
+                    serde_json::json!({"path": "tasks.md", "line": 5, "add_tags": ["urgent"]}),
+                    &ctx,
+                )
+                .await
+                .expect("tasks_update add_tags"),
+        );
+        assert_eq!(
+            tagged["line_text"],
+            "- [ ] write report ⏫ 📅 2099-01-01 #work #urgent"
+        );
+
+        // Recurrence: completing a recurring task spawns its next occurrence
+        // directly below, rendered in the detected dialect.
+        server
+            .call_tool(
+                "write_note",
+                serde_json::json!({
+                    "path": "recurring.md",
+                    "content": "# Recurring\n\n- [ ] water plants 🔁 every week 📅 2026-07-10\n",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("seed recurring note");
+        let recur = structured(
+            server
+                .call_tool(
+                    "tasks_complete",
+                    serde_json::json!({"path": "recurring.md", "line": 3, "done_date": "2026-07-12"}),
+                    &ctx,
+                )
+                .await
+                .expect("complete recurring"),
+        );
+        assert_eq!(recur["spawned_next_occurrence"], true);
+        assert_eq!(
+            recur["next_occurrence_line"],
+            "- [ ] water plants 🔁 every week 📅 2026-07-17",
+            "the due date advances by one week and the line is re-rendered"
+        );
     }
 
     #[cfg(feature = "tasks")]

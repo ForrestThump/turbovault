@@ -14,10 +14,14 @@ Tools are advertised namespaced under the plugin id `tasks`:
 | `tasks_list`     | read  | list tasks (status + tag filters) |
 | `tasks_overdue`  | read  | pending tasks past their due date |
 | `tasks_tags`     | read  | distinct inline task tags |
-| `tasks_complete` | write | flip checkbox to `[x]` + stamp `✅ <date>` |
-| `tasks_update`   | write | edit fields and re-render the line in the vault's dialect |
+| `tasks_complete` | write | flip checkbox to `[x]` + stamp `✅ <date>`; spawn the next occurrence of a recurring task |
+| `tasks_update`   | write | edit fields (incl. `add_tags`/`remove_tags`) and re-render the line in the vault's dialect |
 | `tasks_delete`   | write | remove a task line |
 | `tasks_config`   | read  | show the settings the module tuned itself to |
+
+These extract the full historical task tool surface (`list_tasks`,
+`get_overdue_tasks`, `list_task_tags`, `complete_task`, `update_task`,
+`delete_task`) onto the plugin boundary, plus `tasks_config`.
 
 All vault access goes through the curated `VaultApi`; every write is
 compare-and-swap (`Match(version)`) — the module cannot blind-overwrite a note.
@@ -56,8 +60,10 @@ every read to the tasks your Tasks plugin would consider real.
 > only door onto the vault's non-note config space and is flagged for upstream
 > review before it is proposed to turbovault-core.
 
-## Deferred (follow-ups)
+## Recurrence
 
-- **Recurrence-spawn on `complete`**: emitting the next occurrence line is pure
-  `to_markdown_line`; it needs a recurrence-rule date engine (`every week`,
-  `every weekday`, …), deferred to keep that logic correct rather than hasty.
+Completing a task with a recurrence rule (`🔁 every week`, `every 2 days`,
+`every weekday`, `every month`, …) spawns the next occurrence as a fresh open
+task directly below the completed one, with its due/scheduled/start dates
+advanced by the interval (see `recurrence.rs`). The completed line is edited
+losslessly; the spawned line is rendered in the detected dialect.

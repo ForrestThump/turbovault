@@ -16,7 +16,7 @@
 //! | `list`     | read  | all/pending/completed, optional tag filter |
 //! | `overdue`  | read  | pending tasks past `due_date`, oldest first |
 //! | `tags`     | read  | distinct inline task tags across the vault |
-//! | `complete` | write | flip the checkbox + stamp `✅ <done>` (CAS) |
+//! | `complete` | write | flip the checkbox + stamp `✅ <done>`; spawn the next occurrence of a recurring task (CAS) |
 //! | `update`   | write | edit arbitrary fields and re-render the line (CAS) |
 //! | `delete`   | write | remove the task line (CAS) |
 //! | `config`   | read  | show the settings the module tuned itself to |
@@ -34,6 +34,7 @@
 //! ([`render::to_markdown_line`], the write half owned here) → compare-and-swap.
 
 mod config;
+mod recurrence;
 mod render;
 
 use std::collections::BTreeSet;
@@ -163,7 +164,9 @@ impl PluginProvider for TasksProvider {
                         "done": { "type": "string", "description": "YYYY-MM-DD, or null/\"\" to clear" },
                         "cancelled": { "type": "string", "description": "YYYY-MM-DD, or null/\"\" to clear" },
                         "recurrence": { "type": "string", "description": "Recurrence rule, e.g. 'every week', or null/\"\" to clear" },
-                        "tags": { "type": "array", "items": { "type": "string" }, "description": "Replace the task's inline tags (leading # optional)" }
+                        "tags": { "type": "array", "items": { "type": "string" }, "description": "Replace the task's inline tags (leading # optional)" },
+                        "add_tags": { "type": "array", "items": { "type": "string" }, "description": "Add these inline tags (leading # optional); applied after 'tags'" },
+                        "remove_tags": { "type": "array", "items": { "type": "string" }, "description": "Remove these inline tags (leading # optional)" }
                     },
                     "required": ["path", "line"]
                 }),
@@ -418,8 +421,40 @@ impl TasksProvider {
                 "line {line} is out of range for {path:?}"
             )));
         }
+        // The completed line is edited losslessly (surgery), preserving the
+        // author's exact formatting.
         let completed_line = mark_line_completed(&lines[idx], done)?;
         lines[idx] = completed_line.clone();
+
+        // Recurrence: spawn the next occurrence as a fresh open task directly
+        // below the completed one. There is no source line to copy, so it is
+        // rendered — in the vault's detected dialect, with the same indent/marker.
+        let mut next_occurrence: Option<String> = None;
+        if let Some(rule) = task.recurrence.clone()
+            && let Some((next_due, next_scheduled, next_start)) =
+                recurrence::compute_next_occurrence(
+                    &rule,
+                    task.due_date,
+                    task.scheduled_date,
+                    task.start_date,
+                    done,
+                )
+        {
+            let mut next = task.clone();
+            next.is_completed = false;
+            next.done_date = None;
+            next.cancelled_date = None;
+            next.due_date = next_due;
+            next.scheduled_date = next_scheduled;
+            next.start_date = next_start;
+
+            let format = self.config().await.format;
+            let (indent, marker) = split_list_prefix(&lines[idx]);
+            let rendered = format!("{indent}{marker} [ ] {}", render::render_body(&next, format));
+            lines.insert(idx + 1, rendered.clone());
+            next_occurrence = Some(rendered);
+        }
+
         let new_content = lines.join(separator);
 
         let receipt = self
@@ -438,6 +473,8 @@ impl TasksProvider {
             "line": line,
             "completed_line": completed_line,
             "done_date": done.to_string(),
+            "spawned_next_occurrence": next_occurrence.is_some(),
+            "next_occurrence_line": next_occurrence,
             "version": receipt.version,
             "task": task_json(path, &task),
         }))
@@ -723,24 +760,45 @@ fn apply_edits(task: &mut TaskItem, args: &Value) -> PluginResult<()> {
         };
     }
 
+    // `tags` replaces the whole set; `add_tags`/`remove_tags` edit it
+    // incrementally. When combined, the replace is applied first.
     if let Some(value) = args.get("tags") {
-        let items = value
-            .as_array()
-            .ok_or_else(|| PluginError::invalid_input("tags must be an array of strings"))?;
-        let mut tags = Vec::with_capacity(items.len());
-        for item in items {
-            let raw = item
-                .as_str()
-                .ok_or_else(|| PluginError::invalid_input("tags must be strings"))?;
+        task.tags = string_array(value, "tags")?
+            .into_iter()
+            .map(|raw| raw.trim().trim_start_matches('#').to_string())
+            .filter(|tag| !tag.is_empty())
+            .collect();
+    }
+    if let Some(value) = args.get("add_tags") {
+        for raw in string_array(value, "add_tags")? {
             let clean = raw.trim().trim_start_matches('#');
-            if !clean.is_empty() {
-                tags.push(clean.to_string());
+            if !clean.is_empty() && !task.tags.iter().any(|tag| tag.eq_ignore_ascii_case(clean)) {
+                task.tags.push(clean.to_string());
             }
         }
-        task.tags = tags;
+    }
+    if let Some(value) = args.get("remove_tags") {
+        let removals: Vec<String> = string_array(value, "remove_tags")?
+            .into_iter()
+            .map(|raw| raw.trim().trim_start_matches('#').to_ascii_lowercase())
+            .collect();
+        task.tags
+            .retain(|tag| !removals.iter().any(|removal| removal.eq_ignore_ascii_case(tag)));
     }
 
     Ok(())
+}
+
+fn string_array<'a>(value: &'a Value, key: &str) -> PluginResult<Vec<&'a str>> {
+    value
+        .as_array()
+        .ok_or_else(|| PluginError::invalid_input(format!("{key} must be an array of strings")))?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .ok_or_else(|| PluginError::invalid_input(format!("{key} must be strings")))
+        })
+        .collect()
 }
 
 fn edit_date(field: &mut Option<NaiveDate>, args: &Value, key: &str) -> PluginResult<()> {
