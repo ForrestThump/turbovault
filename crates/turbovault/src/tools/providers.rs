@@ -772,6 +772,168 @@ mod tests {
         assert_eq!(stale.jsonrpc_code(), -32600);
     }
 
+    #[cfg(feature = "tasks")]
+    #[tokio::test]
+    async fn tasks_module_serves_namespaced_tools_and_round_trips_through_the_vault_api() {
+        use turbovault_core::VaultConfig;
+
+        let temp = tempfile::TempDir::new().expect("temp vault");
+        let server = ObsidianMcpServer::new_with_plugins(vec![Arc::new(
+            turbovault_plugin_tasks::TasksPlugin,
+        )])
+        .expect("plugin composition");
+        let config = VaultConfig::builder("tasks-test", temp.path())
+            .build()
+            .expect("vault config");
+        server
+            .multi_vault()
+            .add_vault(config)
+            .await
+            .expect("register vault");
+        server
+            .multi_vault()
+            .set_active_vault("tasks-test")
+            .await
+            .expect("select vault");
+
+        // Catalog: the base 74 tools plus exactly the module's five, advertised
+        // only under their namespaced ids — never the bare local names.
+        let advertised = server.list_tools();
+        assert_eq!(
+            advertised.len(),
+            79,
+            "tasks module must add exactly five tools to the 74-tool base"
+        );
+        for name in [
+            "tasks_list",
+            "tasks_overdue",
+            "tasks_tags",
+            "tasks_complete",
+            "tasks_delete",
+        ] {
+            assert!(
+                advertised.iter().any(|tool| tool.name == name),
+                "missing namespaced tool {name}"
+            );
+        }
+        for bare in ["list", "overdue", "tags", "complete", "delete"] {
+            assert!(
+                !advertised.iter().any(|tool| tool.name == bare),
+                "unprefixed tool {bare} must not be public"
+            );
+        }
+
+        let ctx = RequestContext::with_id("tasks-request");
+
+        // Seed a small task list through the public core write tool so the read
+        // path has real content to parse.
+        let note = "# Tasks\n\n\
+             - [ ] buy milk #errand 📅 2026-07-01\n\
+             - [x] ship release #work ✅ 2026-07-10\n\
+             - [ ] write report #work 📅 2099-01-01\n";
+        server
+            .call_tool(
+                "write_note",
+                serde_json::json!({"path": "tasks.md", "content": note}),
+                &ctx,
+            )
+            .await
+            .expect("seed note");
+
+        // Read side: total, status filter, tag filter, overdue, distinct tags.
+        let all = structured(
+            server
+                .call_tool("tasks_list", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_list"),
+        );
+        assert_eq!(all["count"], 3);
+
+        let pending = structured(
+            server
+                .call_tool("tasks_list", serde_json::json!({"status": "pending"}), &ctx)
+                .await
+                .expect("tasks_list pending"),
+        );
+        assert_eq!(pending["count"], 2);
+
+        let work = structured(
+            server
+                .call_tool("tasks_list", serde_json::json!({"tags": ["work"]}), &ctx)
+                .await
+                .expect("tasks_list tag filter"),
+        );
+        assert_eq!(work["count"], 2);
+
+        let overdue = structured(
+            server
+                .call_tool(
+                    "tasks_overdue",
+                    serde_json::json!({"as_of": "2026-07-19"}),
+                    &ctx,
+                )
+                .await
+                .expect("tasks_overdue"),
+        );
+        assert_eq!(
+            overdue["count"], 1,
+            "only the past-due pending task is overdue (completed and future tasks excluded)"
+        );
+        assert_eq!(overdue["tasks"][0]["line"], 3);
+
+        let tags = structured(
+            server
+                .call_tool("tasks_tags", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_tags"),
+        );
+        assert_eq!(tags["tags"], serde_json::json!(["errand", "work"]));
+
+        // Write side: a stale compare-and-swap token is refused with a conflict.
+        let conflict = server
+            .call_tool(
+                "tasks_complete",
+                serde_json::json!({
+                    "path": "tasks.md",
+                    "line": 3,
+                    "expected_version": "not-the-version",
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("stale expected_version must be refused");
+        assert_eq!(conflict.jsonrpc_code(), -32600);
+
+        // A clean completion flips the checkbox and stamps the done date, and the
+        // change is durable and observable back through the read path.
+        let completed = structured(
+            server
+                .call_tool(
+                    "tasks_complete",
+                    serde_json::json!({
+                        "path": "tasks.md",
+                        "line": 3,
+                        "done_date": "2026-07-19",
+                    }),
+                    &ctx,
+                )
+                .await
+                .expect("tasks_complete"),
+        );
+        assert_eq!(
+            completed["completed_line"],
+            "- [x] buy milk #errand 📅 2026-07-01 ✅ 2026-07-19"
+        );
+
+        let after = structured(
+            server
+                .call_tool("tasks_list", serde_json::json!({"status": "pending"}), &ctx)
+                .await
+                .expect("tasks_list after complete"),
+        );
+        assert_eq!(after["count"], 1, "the completed task is no longer pending");
+    }
+
     #[cfg(feature = "plugin-api")]
     #[test]
     fn duplicate_plugin_namespaces_are_rejected_before_serving() {
