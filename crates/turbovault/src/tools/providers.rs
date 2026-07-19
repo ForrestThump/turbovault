@@ -641,7 +641,6 @@ mod tests {
                 .await?;
             let snapshot = self.vault.read_note(path).await?;
             let notes = self.vault.list_notes().await?;
-            let configs = self.vault.list_configs().await?;
             let config_content = match arguments
                 .get("config_path")
                 .and_then(serde_json::Value::as_str)
@@ -658,7 +657,6 @@ mod tests {
                 "receipt": receipt,
                 "snapshot": snapshot,
                 "notes": notes,
-                "configs": configs,
                 "config_content": config_content,
             }))
             .map_err(|error| PluginError::internal(error.to_string()))
@@ -726,12 +724,8 @@ mod tests {
         assert_eq!(result["snapshot"]["content"], "# Plugin");
         assert_eq!(result["receipt"]["version"], result["snapshot"]["version"]);
         assert_eq!(result["notes"], serde_json::json!(["plugin.md"]));
-        // Config space: enumerated separately from notes, and readable by path.
-        assert_eq!(
-            result["configs"],
-            serde_json::json!([".obsidian/plugins/example/data.json"]),
-            "list_configs enumerates the .obsidian space, not the note space"
-        );
+        // Config space is name-addressed: a known `.obsidian/` path reads back,
+        // separately from the note APIs.
         assert_eq!(result["config_content"], "{\"k\":\"v\"}");
 
         let event = events.recv().await.expect("plugin write event");

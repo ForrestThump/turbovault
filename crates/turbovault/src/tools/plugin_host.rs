@@ -193,40 +193,6 @@ impl VaultHost for PluginVaultHost {
         })
     }
 
-    async fn list_configs(&self) -> PluginResult<Vec<String>> {
-        let manager = self
-            .core
-            .get_active_vault_manager()
-            .await
-            .map_err(map_host_error)?;
-        let root = manager.vault_path().join(".obsidian");
-
-        // Iterative walk of the config dir. It is small (settings JSON, plugin
-        // folders), so a synchronous descent here is cheap.
-        let mut out = Vec::new();
-        let mut stack = vec![root];
-        while let Some(dir) = stack.pop() {
-            let entries = match std::fs::read_dir(&dir) {
-                Ok(entries) => entries,
-                // A vault without `.obsidian/` simply has no config files.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(PluginError::internal(error.to_string())),
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                match entry.file_type() {
-                    Ok(file_type) if file_type.is_dir() => stack.push(path),
-                    Ok(file_type) if file_type.is_file() => {
-                        out.push(manager.relative_path(&path))
-                    }
-                    _ => {}
-                }
-            }
-        }
-        out.sort();
-        Ok(out)
-    }
-
     async fn read_config(&self, relative_path: &str) -> PluginResult<Option<Vec<u8>>> {
         // Scope this capability to the Obsidian app-config namespace. Modules may
         // read `.obsidian/**` (their settings live there); everything else stays
