@@ -22,6 +22,10 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+# tokio::sync::OnceCell: the module resolves its Obsidian-Tasks settings once,
+# lazily, on first tool call (Plugin::build is synchronous, so detection — which
+# reads `.obsidian` via the async VaultApi — cannot happen at construction).
+tokio = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

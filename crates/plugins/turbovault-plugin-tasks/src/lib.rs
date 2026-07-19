@@ -17,13 +17,24 @@
 //! | `overdue`  | read  | pending tasks past `due_date`, oldest first |
 //! | `tags`     | read  | distinct inline task tags across the vault |
 //! | `complete` | write | flip the checkbox + stamp `✅ <done>` (CAS) |
+//! | `update`   | write | edit arbitrary fields and re-render the line (CAS) |
 //! | `delete`   | write | remove the task line (CAS) |
+//! | `config`   | read  | show the settings the module tuned itself to |
 //!
-//! `update` (arbitrary field edits) and recurrence-spawn on `complete` are
-//! deliberately deferred: they need the `TaskItem` → markdown renderer
-//! (`to_markdown_line`), which lives on the fork's task branch and should be
-//! ported into `turbovault-core` (or this crate) as a follow-up rather than
-//! re-implemented lossily here.
+//! ## Self-tuning
+//!
+//! The module renders edits (`update`) in the dialect the user's Obsidian Tasks
+//! plugin uses — emoji or Dataview — and honors that plugin's global filter. It
+//! learns both by reading `.obsidian/plugins/obsidian-tasks-plugin/data.json`
+//! through the curated [`VaultApi::read_config`], falling back to a content
+//! heuristic when the settings file is unavailable. See [`config`] and
+//! [`render`].
+//!
+//! Writes read → parse (via core's `parse_tasks`) → edit → render
+//! ([`render::to_markdown_line`], the write half owned here) → compare-and-swap.
+
+mod config;
+mod render;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -31,12 +42,22 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::NaiveDate;
 use serde_json::{Value, json};
+use tokio::sync::OnceCell;
 use turbomcp_types::ToolInputSchema;
-use turbovault_core::TaskItem;
+use turbovault_core::{TaskItem, TaskPriority};
 use turbovault_plugin_api::{
     Plugin, PluginContext, PluginDescriptor, PluginError, PluginProvider, PluginRequestContext,
     PluginResult, Tool, ToolResult, VaultApi, WriteNoteRequest, WritePrecondition, WriteProvenance,
 };
+
+/// The task renderer and its dialect enum are part of this crate's public API:
+/// the write half of the task round trip (its read half is core's
+/// `parse_tasks`). `to_markdown_line` is also the seam a future recurrence-spawn
+/// on `complete` will build on.
+pub use config::TaskFormat;
+pub use render::to_markdown_line;
+
+use config::TasksConfig;
 
 /// Compiled-in factory for the `tasks` module.
 pub struct TasksPlugin;
@@ -54,6 +75,7 @@ impl Plugin for TasksPlugin {
     fn build(&self, context: PluginContext) -> PluginResult<Arc<dyn PluginProvider>> {
         Ok(Arc::new(TasksProvider {
             vault: context.vault,
+            config: OnceCell::new(),
         }))
     }
 }
@@ -61,6 +83,10 @@ impl Plugin for TasksPlugin {
 /// Runtime provider holding the curated vault facade.
 pub struct TasksProvider {
     vault: VaultApi,
+    /// Tasks-plugin settings, resolved once on first use. `Plugin::build` is
+    /// synchronous and detection reads `.obsidian` via the async `VaultApi`, so
+    /// it cannot run at construction time.
+    config: OnceCell<TasksConfig>,
 }
 
 #[async_trait]
@@ -119,6 +145,30 @@ impl PluginProvider for TasksProvider {
                 }),
             ),
             tool(
+                "update",
+                "Edit a task's fields and rewrite the line in the vault's Tasks dialect (emoji or dataview). Absent fields are left unchanged; pass null or \"\" to clear an optional field.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Vault-relative note path (from list)" },
+                        "line": { "type": "integer", "minimum": 1, "description": "1-based line of the task (from list)" },
+                        "expected_version": { "type": "string", "description": "Optimistic-concurrency token from a prior read; rejected if the note has changed" },
+                        "content": { "type": "string", "description": "Replace the task description text" },
+                        "completed": { "type": "boolean", "description": "Set the checkbox state" },
+                        "priority": { "type": "string", "description": "highest | high | medium | low | lowest | normal" },
+                        "due": { "type": "string", "description": "YYYY-MM-DD, or null/\"\" to clear" },
+                        "scheduled": { "type": "string", "description": "YYYY-MM-DD, or null/\"\" to clear" },
+                        "start": { "type": "string", "description": "YYYY-MM-DD, or null/\"\" to clear" },
+                        "created": { "type": "string", "description": "YYYY-MM-DD, or null/\"\" to clear" },
+                        "done": { "type": "string", "description": "YYYY-MM-DD, or null/\"\" to clear" },
+                        "cancelled": { "type": "string", "description": "YYYY-MM-DD, or null/\"\" to clear" },
+                        "recurrence": { "type": "string", "description": "Recurrence rule, e.g. 'every week', or null/\"\" to clear" },
+                        "tags": { "type": "array", "items": { "type": "string" }, "description": "Replace the task's inline tags (leading # optional)" }
+                    },
+                    "required": ["path", "line"]
+                }),
+            ),
+            tool(
                 "delete",
                 "Permanently remove a task line from a note (destructive; use complete to record completion instead)",
                 json!({
@@ -130,6 +180,11 @@ impl PluginProvider for TasksProvider {
                     },
                     "required": ["path", "line"]
                 }),
+            ),
+            tool(
+                "config",
+                "Report the Obsidian Tasks settings the module tuned itself to: metadata format, global filter, and where they were resolved from",
+                json!({ "type": "object", "properties": {} }),
             ),
         ]
     }
@@ -145,15 +200,71 @@ impl PluginProvider for TasksProvider {
             "overdue" => self.overdue(&arguments).await,
             "tags" => self.tags().await,
             "complete" => self.complete(&arguments, &context).await,
+            "update" => self.update(&arguments, &context).await,
             "delete" => self.delete(&arguments, &context).await,
+            "config" => self.config_report().await,
             other => Err(PluginError::not_found(format!("unknown tool {other:?}"))),
         }
     }
 }
 
 impl TasksProvider {
+    /// Resolve the Tasks-plugin settings once, lazily: authoritative
+    /// `data.json` first, then a content heuristic, then defaults.
+    async fn config(&self) -> &TasksConfig {
+        self.config
+            .get_or_init(|| async {
+                if let Ok(Some(bytes)) =
+                    self.vault.read_config(config::OBSIDIAN_TASKS_DATA_PATH).await
+                    && let Some(resolved) = TasksConfig::from_obsidian_data(&bytes)
+                {
+                    return resolved;
+                }
+                TasksConfig::from_heuristic(&self.sample_task_text().await)
+            })
+            .await
+    }
+
+    /// Gather a bounded sample of raw task-line text for format detection. Uses
+    /// raw note content (not parsed tasks) because the dialect — emoji vs
+    /// dataview — is exactly what parsing erases.
+    async fn sample_task_text(&self) -> String {
+        const MAX_LINES: usize = 400;
+        let mut sample = String::new();
+        let mut lines = 0usize;
+        let Ok(notes) = self.vault.list_notes().await else {
+            return sample;
+        };
+        for path in notes {
+            if !path.ends_with(".md") {
+                continue;
+            }
+            let Ok(snapshot) = self.vault.read_note(&path).await else {
+                continue;
+            };
+            for line in snapshot.content.lines() {
+                if line.contains("- [") || line.contains("* [") {
+                    sample.push_str(line);
+                    sample.push('\n');
+                    lines += 1;
+                    if lines >= MAX_LINES {
+                        return sample;
+                    }
+                }
+            }
+        }
+        sample
+    }
+
     /// Read every markdown note and parse its tasks, tagged with the note path.
+    /// Honors the resolved global filter, so results mirror what the user's
+    /// Tasks plugin considers a task.
     async fn read_all_tasks(&self) -> PluginResult<Vec<(String, TaskItem)>> {
+        let (global_filter, remove_global_filter) = {
+            let config = self.config().await;
+            (config.global_filter.clone(), config.remove_global_filter)
+        };
+
         let notes = self.vault.list_notes().await?;
         let mut out = Vec::new();
         for path in notes {
@@ -165,7 +276,26 @@ impl TasksProvider {
             let Ok(snapshot) = self.vault.read_note(&path).await else {
                 continue;
             };
-            for task in turbovault_parser::parse_tasks(&snapshot.content) {
+            for mut task in turbovault_parser::parse_tasks(&snapshot.content) {
+                if let Some(filter) = &global_filter {
+                    if let Some(tag) = filter.strip_prefix('#') {
+                        // A tag filter (the Obsidian default) matches on the tag
+                        // token, not a substring of the prose.
+                        let tag = tag.to_ascii_lowercase();
+                        if !task.tags.iter().any(|value| value.eq_ignore_ascii_case(&tag)) {
+                            continue;
+                        }
+                        if remove_global_filter {
+                            task.tags.retain(|value| !value.eq_ignore_ascii_case(&tag));
+                        }
+                    } else {
+                        // A non-tag filter is a literal substring of the task text.
+                        let needle = filter.to_ascii_lowercase();
+                        if !task.content.to_ascii_lowercase().contains(&needle) {
+                            continue;
+                        }
+                    }
+                }
                 out.push((path.clone(), task));
             }
         }
@@ -313,6 +443,72 @@ impl TasksProvider {
         }))
     }
 
+    async fn update(
+        &self,
+        args: &Value,
+        context: &PluginRequestContext,
+    ) -> PluginResult<ToolResult> {
+        let path = required_str(args, "path")?;
+        let line = required_line(args)?;
+
+        let snapshot = self.vault.read_note(path).await?;
+        verify_version(args, &snapshot.version)?;
+        let mut task = task_at_line(&snapshot.content, line, path)?;
+        apply_edits(&mut task, args)?;
+
+        let format = self.config().await.format;
+        let separator = line_sep(&snapshot.content);
+        let mut lines: Vec<String> =
+            snapshot.content.split(separator).map(str::to_string).collect();
+        let idx = line - 1;
+        if idx >= lines.len() {
+            return Err(PluginError::invalid_input(format!(
+                "line {line} is out of range for {path:?}"
+            )));
+        }
+
+        // Preserve the original indentation and list marker; re-render only the
+        // checkbox state and the description+metadata tail.
+        let (indent, marker) = split_list_prefix(&lines[idx]);
+        let box_char = if task.is_completed { 'x' } else { ' ' };
+        let new_line = format!(
+            "{indent}{marker} [{box_char}] {}",
+            render::render_body(&task, format)
+        );
+        lines[idx] = new_line.clone();
+        let new_content = lines.join(separator);
+
+        let receipt = self
+            .vault
+            .write_note(WriteNoteRequest {
+                path: path.to_string(),
+                content: new_content,
+                precondition: WritePrecondition::Match(snapshot.version.clone()),
+                commit_message: Some(format!("tasks: update {path}:{line}")),
+                provenance: Some(provenance(context, format!("update {path}:{line}"))),
+            })
+            .await?;
+
+        ok_json(json!({
+            "path": path,
+            "line": line,
+            "line_text": new_line,
+            "format": format_name(format),
+            "version": receipt.version,
+            "task": task_json(path, &task),
+        }))
+    }
+
+    async fn config_report(&self) -> PluginResult<ToolResult> {
+        let config = self.config().await;
+        ok_json(json!({
+            "format": format_name(config.format),
+            "global_filter": config.global_filter,
+            "remove_global_filter": config.remove_global_filter,
+            "source": config.source.as_str(),
+        }))
+    }
+
     async fn delete(
         &self,
         args: &Value,
@@ -449,6 +645,133 @@ fn mark_line_completed(line: &str, done: NaiveDate) -> PluginResult<String> {
         result.push_str(&format!(" ✅ {done}"));
     }
     Ok(result)
+}
+
+fn format_name(format: TaskFormat) -> &'static str {
+    match format {
+        TaskFormat::Emoji => "emoji",
+        TaskFormat::Dataview => "dataview",
+    }
+}
+
+/// Split a list line into (leading indent, list marker) so an edit can rewrite
+/// the content while preserving the author's indentation and bullet style.
+fn split_list_prefix(line: &str) -> (String, String) {
+    let indent: String = line
+        .chars()
+        .take_while(|character| *character == ' ' || *character == '\t')
+        .collect();
+    let rest = &line[indent.len()..];
+
+    for bullet in ['-', '*', '+'] {
+        if rest.starts_with(bullet) && rest[1..].starts_with(' ') {
+            return (indent, bullet.to_string());
+        }
+    }
+    // Ordered list: digits followed by `.` or `)`.
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if !digits.is_empty() {
+        let after = &rest[digits.len()..];
+        if after.starts_with(". ") {
+            return (indent, format!("{digits}."));
+        }
+        if after.starts_with(") ") {
+            return (indent, format!("{digits})"));
+        }
+    }
+    (indent, "-".to_string())
+}
+
+/// Apply the optional edit fields from `args` onto a parsed task. Absent keys
+/// leave a field unchanged; `null` or `""` clears an optional field.
+fn apply_edits(task: &mut TaskItem, args: &Value) -> PluginResult<()> {
+    if let Some(value) = args.get("content") {
+        task.content = value
+            .as_str()
+            .ok_or_else(|| PluginError::invalid_input("content must be a string"))?
+            .to_string();
+    }
+    if let Some(value) = args.get("completed") {
+        task.is_completed = value
+            .as_bool()
+            .ok_or_else(|| PluginError::invalid_input("completed must be a boolean"))?;
+    }
+    if let Some(value) = args.get("priority") {
+        let word = value
+            .as_str()
+            .ok_or_else(|| PluginError::invalid_input("priority must be a string"))?;
+        task.priority = parse_priority_word(word)?;
+    }
+
+    edit_date(&mut task.due_date, args, "due")?;
+    edit_date(&mut task.scheduled_date, args, "scheduled")?;
+    edit_date(&mut task.start_date, args, "start")?;
+    edit_date(&mut task.created_date, args, "created")?;
+    edit_date(&mut task.done_date, args, "done")?;
+    edit_date(&mut task.cancelled_date, args, "cancelled")?;
+
+    if let Some(value) = args.get("recurrence") {
+        task.recurrence = match value {
+            Value::Null => None,
+            Value::String(text) if text.trim().is_empty() => None,
+            Value::String(text) => Some(text.trim().to_string()),
+            _ => {
+                return Err(PluginError::invalid_input(
+                    "recurrence must be a string or null",
+                ));
+            }
+        };
+    }
+
+    if let Some(value) = args.get("tags") {
+        let items = value
+            .as_array()
+            .ok_or_else(|| PluginError::invalid_input("tags must be an array of strings"))?;
+        let mut tags = Vec::with_capacity(items.len());
+        for item in items {
+            let raw = item
+                .as_str()
+                .ok_or_else(|| PluginError::invalid_input("tags must be strings"))?;
+            let clean = raw.trim().trim_start_matches('#');
+            if !clean.is_empty() {
+                tags.push(clean.to_string());
+            }
+        }
+        task.tags = tags;
+    }
+
+    Ok(())
+}
+
+fn edit_date(field: &mut Option<NaiveDate>, args: &Value, key: &str) -> PluginResult<()> {
+    match args.get(key) {
+        None => {}
+        Some(Value::Null) => *field = None,
+        Some(Value::String(text)) if text.trim().is_empty() => *field = None,
+        Some(Value::String(text)) => *field = Some(parse_date(text, key)?),
+        Some(_) => {
+            return Err(PluginError::invalid_input(format!(
+                "{key} must be a YYYY-MM-DD string or null"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn parse_priority_word(word: &str) -> PluginResult<TaskPriority> {
+    Ok(match word.trim().to_ascii_lowercase().as_str() {
+        "highest" => TaskPriority::Highest,
+        "high" => TaskPriority::High,
+        "medium" => TaskPriority::Medium,
+        "low" => TaskPriority::Low,
+        "lowest" => TaskPriority::Lowest,
+        "normal" | "none" | "" => TaskPriority::Normal,
+        other => {
+            return Err(PluginError::invalid_input(format!(
+                "unknown priority {other:?}; use highest|high|medium|low|lowest|normal"
+            )));
+        }
+    })
 }
 
 fn task_json(path: &str, task: &TaskItem) -> Value {

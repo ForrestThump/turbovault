@@ -796,27 +796,29 @@ mod tests {
             .await
             .expect("select vault");
 
-        // Catalog: the base 74 tools plus exactly the module's five, advertised
+        // Catalog: the base 74 tools plus exactly the module's seven, advertised
         // only under their namespaced ids — never the bare local names.
         let advertised = server.list_tools();
         assert_eq!(
             advertised.len(),
-            79,
-            "tasks module must add exactly five tools to the 74-tool base"
+            81,
+            "tasks module must add exactly seven tools to the 74-tool base"
         );
         for name in [
             "tasks_list",
             "tasks_overdue",
             "tasks_tags",
             "tasks_complete",
+            "tasks_update",
             "tasks_delete",
+            "tasks_config",
         ] {
             assert!(
                 advertised.iter().any(|tool| tool.name == name),
                 "missing namespaced tool {name}"
             );
         }
-        for bare in ["list", "overdue", "tags", "complete", "delete"] {
+        for bare in ["list", "overdue", "tags", "complete", "update", "delete", "config"] {
             assert!(
                 !advertised.iter().any(|tool| tool.name == bare),
                 "unprefixed tool {bare} must not be public"
@@ -932,6 +934,132 @@ mod tests {
                 .expect("tasks_list after complete"),
         );
         assert_eq!(after["count"], 1, "the completed task is no longer pending");
+
+        // Self-tuning: the temp vault has no `.obsidian/`, so config resolution
+        // falls back to the content heuristic, which sees the emoji signifiers
+        // in the seeded note and reports emoji format.
+        let config = structured(
+            server
+                .call_tool("tasks_config", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_config"),
+        );
+        assert_eq!(config["format"], "emoji");
+        assert_eq!(config["source"], "heuristic");
+        assert_eq!(config["global_filter"], serde_json::Value::Null);
+
+        // Update: edit a field and re-render the line in the detected dialect.
+        // Line 5 is "- [ ] write report #work 📅 2099-01-01"; raise its priority.
+        let updated = structured(
+            server
+                .call_tool(
+                    "tasks_update",
+                    serde_json::json!({"path": "tasks.md", "line": 5, "priority": "high"}),
+                    &ctx,
+                )
+                .await
+                .expect("tasks_update"),
+        );
+        assert_eq!(updated["format"], "emoji");
+        assert_eq!(
+            updated["line_text"],
+            "- [ ] write report ⏫ 📅 2099-01-01 #work",
+            "priority emoji is inserted and the line is re-rendered canonically"
+        );
+    }
+
+    #[cfg(feature = "tasks")]
+    #[tokio::test]
+    async fn tasks_module_tunes_itself_to_obsidian_tasks_settings() {
+        use turbovault_core::VaultConfig;
+
+        let temp = tempfile::TempDir::new().expect("temp vault");
+        // A real Obsidian Tasks settings file in the vault's config dir — the
+        // authoritative source the module reads through `VaultApi::read_config`.
+        let data_dir = temp
+            .path()
+            .join(".obsidian")
+            .join("plugins")
+            .join("obsidian-tasks-plugin");
+        std::fs::create_dir_all(&data_dir).expect("config dir");
+        std::fs::write(
+            data_dir.join("data.json"),
+            br##"{ "taskFormat": "dataview", "globalFilter": "#task" }"##,
+        )
+        .expect("write data.json");
+
+        let server = ObsidianMcpServer::new_with_plugins(vec![Arc::new(
+            turbovault_plugin_tasks::TasksPlugin,
+        )])
+        .expect("plugin composition");
+        let config = VaultConfig::builder("tuned", temp.path())
+            .build()
+            .expect("vault config");
+        server
+            .multi_vault()
+            .add_vault(config)
+            .await
+            .expect("register vault");
+        server
+            .multi_vault()
+            .set_active_vault("tuned")
+            .await
+            .expect("select vault");
+
+        let ctx = RequestContext::with_id("tuned-request");
+
+        // The authoritative settings win: dataview format, global filter `#task`.
+        let cfg = structured(
+            server
+                .call_tool("tasks_config", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_config"),
+        );
+        assert_eq!(cfg["source"], "obsidian-data");
+        assert_eq!(cfg["format"], "dataview");
+        assert_eq!(cfg["global_filter"], "#task");
+
+        // One task carries the global filter, one does not (and mentions "task"
+        // only in prose — which must not match a tag filter).
+        let note = "# Tasks\n\n\
+             - [ ] write tests #task 📅 2026-08-01\n\
+             - [ ] this is not a task really\n";
+        server
+            .call_tool(
+                "write_note",
+                serde_json::json!({"path": "t.md", "content": note}),
+                &ctx,
+            )
+            .await
+            .expect("seed note");
+
+        let all = structured(
+            server
+                .call_tool("tasks_list", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_list"),
+        );
+        assert_eq!(all["count"], 1, "global filter keeps only #task-bearing tasks");
+
+        // Edits render in the configured dataview dialect, not emoji.
+        let updated = structured(
+            server
+                .call_tool(
+                    "tasks_update",
+                    serde_json::json!({"path": "t.md", "line": 3, "priority": "high"}),
+                    &ctx,
+                )
+                .await
+                .expect("tasks_update"),
+        );
+        assert_eq!(updated["format"], "dataview");
+        let line_text = updated["line_text"].as_str().expect("line_text");
+        assert!(line_text.contains("[priority:: high]"), "{line_text}");
+        assert!(line_text.contains("[due:: 2026-08-01]"), "{line_text}");
+        assert!(
+            !line_text.contains('📅') && !line_text.contains('⏫'),
+            "dialect must be dataview, not emoji: {line_text}"
+        );
     }
 
     #[cfg(feature = "plugin-api")]
