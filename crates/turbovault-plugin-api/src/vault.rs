@@ -101,6 +101,23 @@ pub trait VaultHost: Send + Sync {
     async fn read_config(&self, _relative_path: &str) -> PluginResult<Option<Vec<u8>>> {
         Ok(None)
     }
+
+    /// Return an absolute path to a **per-vault, plugin-private** state directory,
+    /// creating it on demand.
+    ///
+    /// This is the read-write counterpart to the read-only note/config APIs: a
+    /// module owns this directory (and only this directory) for derived state
+    /// that is neither notes nor app config — a search index, a cache, a sidecar
+    /// database. It is scoped to the active vault (state for vault A must not
+    /// collide with vault B) and to the plugin's own id.
+    ///
+    /// The default errors: a host that provides no plugin storage cannot
+    /// synthesize a safe location, so modules that require it fail loudly.
+    async fn plugin_state_dir(&self) -> PluginResult<std::path::PathBuf> {
+        Err(crate::PluginError::unavailable(
+            "this host does not provide plugin state storage",
+        ))
+    }
 }
 
 /// Cloneable, curated facade supplied to every plugin.
@@ -145,5 +162,11 @@ impl VaultApi {
     /// returning `None` when it does not exist or the host declines the read.
     pub async fn read_config(&self, relative_path: &str) -> PluginResult<Option<Vec<u8>>> {
         self.host.read_config(relative_path).await
+    }
+
+    /// Absolute path to this plugin's per-vault private state directory, created
+    /// on demand. Read-write, owned by the module.
+    pub async fn plugin_state_dir(&self) -> PluginResult<std::path::PathBuf> {
+        self.host.plugin_state_dir().await
     }
 }

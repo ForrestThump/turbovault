@@ -298,7 +298,6 @@ impl ObsidianMcpServer {
         let hooks = {
             const DEFAULT_HOOK_CAPACITY: usize = 1_024;
             let hooks = HookBus::new(DEFAULT_HOOK_CAPACITY);
-            let vault = VaultApi::new(super::plugin_host::vault_host(core.clone(), hooks.clone()));
 
             for plugin in plugins {
                 let descriptor = plugin.descriptor();
@@ -306,9 +305,16 @@ impl ObsidianMcpServer {
                     .validate()
                     .map_err(|error| anyhow!("invalid plugin descriptor: {error}"))?;
                 let prefix = descriptor.id.clone();
+                // Each plugin gets its own id-scoped VaultApi so per-plugin
+                // capabilities (e.g. plugin_state_dir) resolve correctly.
+                let vault = VaultApi::new(super::plugin_host::vault_host(
+                    core.clone(),
+                    hooks.clone(),
+                    descriptor.id.clone(),
+                ));
                 let provider = plugin
                     .build(PluginContext {
-                        vault: vault.clone(),
+                        vault,
                         hooks: hooks.clone(),
                     })
                     .map_err(|error| anyhow!("plugin {prefix:?} failed to build: {error}"))?;
@@ -652,12 +658,22 @@ mod tests {
                     .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
                 None => None,
             };
+            // Exercise the per-plugin read/write state dir: write a marker and
+            // read it back through the returned absolute path.
+            let state_dir = self.vault.plugin_state_dir().await?;
+            let marker = state_dir.join("marker.txt");
+            std::fs::write(&marker, "state-ok")
+                .map_err(|error| PluginError::internal(error.to_string()))?;
+            let state_roundtrip = std::fs::read_to_string(&marker)
+                .map_err(|error| PluginError::internal(error.to_string()))?;
             ToolResult::json(&serde_json::json!({
                 "vault": vault,
                 "receipt": receipt,
                 "snapshot": snapshot,
                 "notes": notes,
                 "config_content": config_content,
+                "state_dir": state_dir.to_string_lossy(),
+                "state_roundtrip": state_roundtrip,
             }))
             .map_err(|error| PluginError::internal(error.to_string()))
         }
@@ -729,6 +745,15 @@ mod tests {
         assert_eq!(result["notes"], serde_json::json!(["plugin.md"]));
         // read_config reads a known `.obsidian/` path, separate from the note space.
         assert_eq!(result["config_content"], "{\"k\":\"v\"}");
+        // plugin_state_dir: per-vault, per-plugin, read/write, round-trips.
+        let state_dir = result["state_dir"].as_str().expect("state_dir");
+        assert!(
+            state_dir
+                .replace('\\', "/")
+                .contains(".turbovault/plugins/contract"),
+            "state dir must be under .turbovault/plugins/<id>: {state_dir}"
+        );
+        assert_eq!(result["state_roundtrip"], "state-ok");
 
         let event = events.recv().await.expect("plugin write event");
         assert_eq!(event.vault, "plugin-test");
