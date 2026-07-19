@@ -85,6 +85,20 @@ pub trait VaultHost: Send + Sync {
     /// Create or compare-and-swap a complete note.
     async fn write_note(&self, request: WriteNoteRequest) -> PluginResult<WriteReceipt>;
 
+    /// List the vault's application-config files (the contents of `.obsidian/`),
+    /// as vault-relative `/`-separated paths.
+    ///
+    /// This is the config-space analog of [`list_notes`](VaultHost::list_notes):
+    /// the note APIs deliberately exclude dotfolders, so this is the only way a
+    /// module can discover what app/plugin config a vault carries (installed
+    /// plugins under `.obsidian/plugins/*/`, `app.json`, and so on) without
+    /// hard-coding paths. Pair it with [`read_config`](VaultHost::read_config).
+    ///
+    /// Hosts MAY decline the capability; the default returns an empty list.
+    async fn list_configs(&self) -> PluginResult<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     /// Read a read-only vault application-config file, e.g. an entry under
     /// `.obsidian/`, returning `None` when it does not exist.
     ///
@@ -139,6 +153,12 @@ impl VaultApi {
     /// Create or compare-and-swap a complete note.
     pub async fn write_note(&self, request: WriteNoteRequest) -> PluginResult<WriteReceipt> {
         self.host.write_note(request).await
+    }
+
+    /// List the vault's application-config files (contents of `.obsidian/`) as
+    /// vault-relative `/`-separated paths. Empty when the host declines.
+    pub async fn list_configs(&self) -> PluginResult<Vec<String>> {
+        self.host.list_configs().await
     }
 
     /// Read a read-only vault application-config file (e.g. under `.obsidian/`),
