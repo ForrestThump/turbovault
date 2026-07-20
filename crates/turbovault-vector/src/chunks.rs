@@ -488,6 +488,21 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    #[test]
+    fn chunk_text_ranges_are_char_boundaries_with_multibyte_and_overlap() {
+        // A long run of multi-byte chars (em-dash = 3 bytes) with no sentence
+        // breaks forces hard-splitting + overlap. Regression: overlap once
+        // subtracted raw byte counts and could land mid-char.
+        let text = "word—word ".repeat(400); // ~4000 chars
+        let ranges = chunk_text(&text, 100, 20);
+        assert!(!ranges.is_empty());
+        for (start, end) in ranges {
+            assert!(text.is_char_boundary(start), "start {start} not a boundary");
+            assert!(text.is_char_boundary(end), "end {end} not a boundary");
+            let _ = &text[start..end]; // must not panic
+        }
+    }
+
     fn open_store() -> (ChunkStore, TempDir) {
         let dir = TempDir::new().unwrap();
         let store = ChunkStore::open(&dir.path().join("test.db")).unwrap();
@@ -729,19 +744,17 @@ pub fn chunk_text(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<(us
     let mut result: Vec<(usize, usize)> = Vec::with_capacity(segments.len());
     result.push(segments[0]);
 
-    for i in 1..segments.len() {
-        let (prev_start, prev_end) = segments[i - 1];
-        let (cur_start, cur_end) = segments[i];
-        // Walk back from prev_end by up to `overlap_chars` characters so the
-        // byte offset always lands on a valid char boundary.
-        let prev_slice = &text[prev_start..prev_end];
-        let overlap_bytes: usize = prev_slice
-            .chars()
+    for &(cur_start, cur_end) in &segments[1..] {
+        // Extend the start back by up to `overlap_chars` characters. Walk actual
+        // char boundaries in `text` (never subtract raw byte counts), so the new
+        // start always lands on a valid boundary even amid multi-byte chars.
+        let new_start = text[..cur_start]
+            .char_indices()
             .rev()
             .take(overlap_chars)
-            .map(|c| c.len_utf8())
-            .sum();
-        let new_start = cur_start.saturating_sub(overlap_bytes);
+            .map(|(idx, _)| idx)
+            .last()
+            .unwrap_or(cur_start);
         result.push((new_start, cur_end));
     }
 

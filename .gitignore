@@ -32,3 +32,6 @@ htmlcov/
 !PUBLISH*.md
 !/LICENSE*
 !LICENSE
+
+# Downloaded embedding models (never commit)
+.fastembed_cache/
