@@ -275,8 +275,7 @@ impl VaultHost for PluginVaultHost {
             let _ = tokio::fs::write(&gitignore, "*\n").await;
         }
         Ok(dir)
-    }
-}
+    }}
 
 pub(super) fn vault_host(
     core: CoreToolHandler,

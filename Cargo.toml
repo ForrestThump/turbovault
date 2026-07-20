@@ -13,6 +13,7 @@ members = [
     "crates/turbovault-vector",
     "crates/plugins/turbovault-plugin-vector",
     "crates/turbovault-plugin-api",
+    "crates/plugins/turbovault-plugin-tasks",
     "crates/turbovault",
 ]
 resolver = "2"
@@ -124,6 +125,7 @@ turbovault-tools = { version = "1.6.0", path = "crates/turbovault-tools" }
 turbovault-vector = { version = "1.6.0", path = "crates/turbovault-vector" }
 turbovault-plugin-vector = { version = "1.6.0", path = "crates/plugins/turbovault-plugin-vector" }
 turbovault-plugin-api = { version = "1.6.0", path = "crates/turbovault-plugin-api" }
+turbovault-plugin-tasks = { version = "1.6.0", path = "crates/plugins/turbovault-plugin-tasks" }
 turbovault = { version = "1.6.0", path = "crates/turbovault" }
 
 [profile.release]

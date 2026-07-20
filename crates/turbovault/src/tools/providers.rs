@@ -725,16 +725,14 @@ mod tests {
             std::fs::write(&marker, "state-ok")
                 .map_err(|error| PluginError::internal(error.to_string()))?;
             let state_roundtrip = std::fs::read_to_string(&marker)
-                .map_err(|error| PluginError::internal(error.to_string()))?;
-            ToolResult::json(&serde_json::json!({
+                .map_err(|error| PluginError::internal(error.to_string()))?;            ToolResult::json(&serde_json::json!({
                 "vault": vault,
                 "receipt": receipt,
                 "snapshot": snapshot,
                 "notes": notes,
                 "config_content": config_content,
                 "state_dir": state_dir.to_string_lossy(),
-                "state_roundtrip": state_roundtrip,
-            }))
+                "state_roundtrip": state_roundtrip,            }))
             .map_err(|error| PluginError::internal(error.to_string()))
         }
     }
@@ -751,8 +749,7 @@ mod tests {
             .path()
             .join(".obsidian")
             .join("plugins")
-            .join("example");
-        std::fs::create_dir_all(&config_dir).expect("config dir");
+            .join("example");        std::fs::create_dir_all(&config_dir).expect("config dir");
         std::fs::write(config_dir.join("data.json"), br#"{"k":"v"}"#).expect("write config");
 
         let server = ObsidianMcpServer::new_with_plugins(vec![Arc::new(ContractPlugin)])
@@ -814,7 +811,6 @@ mod tests {
             "state dir must be under .turbovault/plugins/<id>: {state_dir}"
         );
         assert_eq!(result["state_roundtrip"], "state-ok");
-
         let event = events.recv().await.expect("plugin write event");
         assert_eq!(event.vault, "plugin-test");
         assert_eq!(
@@ -882,6 +878,437 @@ mod tests {
             .await
             .expect_err("stale CAS write must fail");
         assert_eq!(stale.jsonrpc_code(), -32600);
+    }
+
+    #[cfg(feature = "tasks")]
+    #[tokio::test]
+    async fn tasks_module_serves_namespaced_tools_and_round_trips_through_the_vault_api() {
+        use turbovault_core::VaultConfig;
+
+        let temp = tempfile::TempDir::new().expect("temp vault");
+        let server = ObsidianMcpServer::new_with_plugins(vec![Arc::new(
+            turbovault_plugin_tasks::TasksPlugin,
+        )])
+        .expect("plugin composition");
+        let config = VaultConfig::builder("tasks-test", temp.path())
+            .build()
+            .expect("vault config");
+        server
+            .multi_vault()
+            .add_vault(config)
+            .await
+            .expect("register vault");
+        server
+            .multi_vault()
+            .set_active_vault("tasks-test")
+            .await
+            .expect("select vault");
+
+        // Catalog: the base 74 tools plus exactly the module's seven, advertised
+        // only under their namespaced ids — never the bare local names.
+        let advertised = server.list_tools();
+        assert_eq!(
+            advertised.len(),
+            81,
+            "tasks module must add exactly seven tools to the 74-tool base"
+        );
+        for name in [
+            "tasks_list",
+            "tasks_overdue",
+            "tasks_tags",
+            "tasks_complete",
+            "tasks_update",
+            "tasks_delete",
+            "tasks_config",
+        ] {
+            assert!(
+                advertised.iter().any(|tool| tool.name == name),
+                "missing namespaced tool {name}"
+            );
+        }
+        for bare in ["list", "overdue", "tags", "complete", "update", "delete", "config"] {
+            assert!(
+                !advertised.iter().any(|tool| tool.name == bare),
+                "unprefixed tool {bare} must not be public"
+            );
+        }
+
+        let ctx = RequestContext::with_id("tasks-request");
+
+        // Seed a small task list through the public core write tool so the read
+        // path has real content to parse.
+        let note = "# Tasks\n\n\
+             - [ ] buy milk #errand 📅 2026-07-01\n\
+             - [x] ship release #work ✅ 2026-07-10\n\
+             - [ ] write report #work 📅 2099-01-01\n";
+        server
+            .call_tool(
+                "write_note",
+                serde_json::json!({"path": "tasks.md", "content": note}),
+                &ctx,
+            )
+            .await
+            .expect("seed note");
+
+        // Read side: total, status filter, tag filter, overdue, distinct tags.
+        let all = structured(
+            server
+                .call_tool("tasks_list", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_list"),
+        );
+        assert_eq!(all["count"], 3);
+
+        let pending = structured(
+            server
+                .call_tool("tasks_list", serde_json::json!({"status": "pending"}), &ctx)
+                .await
+                .expect("tasks_list pending"),
+        );
+        assert_eq!(pending["count"], 2);
+
+        let work = structured(
+            server
+                .call_tool("tasks_list", serde_json::json!({"tags": ["work"]}), &ctx)
+                .await
+                .expect("tasks_list tag filter"),
+        );
+        assert_eq!(work["count"], 2);
+
+        let overdue = structured(
+            server
+                .call_tool(
+                    "tasks_overdue",
+                    serde_json::json!({"as_of": "2026-07-19"}),
+                    &ctx,
+                )
+                .await
+                .expect("tasks_overdue"),
+        );
+        assert_eq!(
+            overdue["count"], 1,
+            "only the past-due pending task is overdue (completed and future tasks excluded)"
+        );
+        assert_eq!(overdue["tasks"][0]["line"], 3);
+
+        let tags = structured(
+            server
+                .call_tool("tasks_tags", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_tags"),
+        );
+        assert_eq!(tags["tags"], serde_json::json!(["errand", "work"]));
+
+        // Write side: a stale compare-and-swap token is refused with a conflict.
+        let conflict = server
+            .call_tool(
+                "tasks_complete",
+                serde_json::json!({
+                    "path": "tasks.md",
+                    "line": 3,
+                    "expected_version": "not-the-version",
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("stale expected_version must be refused");
+        assert_eq!(conflict.jsonrpc_code(), -32600);
+
+        // A clean completion flips the checkbox and stamps the done date, and the
+        // change is durable and observable back through the read path.
+        let completed = structured(
+            server
+                .call_tool(
+                    "tasks_complete",
+                    serde_json::json!({
+                        "path": "tasks.md",
+                        "line": 3,
+                        "done_date": "2026-07-19",
+                    }),
+                    &ctx,
+                )
+                .await
+                .expect("tasks_complete"),
+        );
+        assert_eq!(
+            completed["completed_line"],
+            "- [x] buy milk #errand 📅 2026-07-01 ✅ 2026-07-19"
+        );
+
+        let after = structured(
+            server
+                .call_tool("tasks_list", serde_json::json!({"status": "pending"}), &ctx)
+                .await
+                .expect("tasks_list after complete"),
+        );
+        assert_eq!(after["count"], 1, "the completed task is no longer pending");
+
+        // Self-tuning: the temp vault has no `.obsidian/`, so config resolution
+        // falls back to the content heuristic, which sees the emoji signifiers
+        // in the seeded note and reports emoji format.
+        let config = structured(
+            server
+                .call_tool("tasks_config", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_config"),
+        );
+        assert_eq!(config["format"], "emoji");
+        assert_eq!(config["source"], "heuristic");
+        assert_eq!(config["global_filter"], serde_json::Value::Null);
+
+        // Update: edit a field and re-render the line in the detected dialect.
+        // Line 5 is "- [ ] write report #work 📅 2099-01-01"; raise its priority.
+        let updated = structured(
+            server
+                .call_tool(
+                    "tasks_update",
+                    serde_json::json!({"path": "tasks.md", "line": 5, "priority": "high"}),
+                    &ctx,
+                )
+                .await
+                .expect("tasks_update"),
+        );
+        assert_eq!(updated["format"], "emoji");
+        assert_eq!(
+            updated["line_text"],
+            "- [ ] write report ⏫ 📅 2099-01-01 #work",
+            "priority emoji is inserted and the line is re-rendered canonically"
+        );
+
+        // add_tags edits the tag set incrementally (keeping existing tags).
+        let tagged = structured(
+            server
+                .call_tool(
+                    "tasks_update",
+                    serde_json::json!({"path": "tasks.md", "line": 5, "add_tags": ["urgent"]}),
+                    &ctx,
+                )
+                .await
+                .expect("tasks_update add_tags"),
+        );
+        assert_eq!(
+            tagged["line_text"],
+            "- [ ] write report ⏫ 📅 2099-01-01 #work #urgent"
+        );
+
+        // Recurrence: completing a recurring task spawns its next occurrence
+        // directly below, rendered in the detected dialect.
+        server
+            .call_tool(
+                "write_note",
+                serde_json::json!({
+                    "path": "recurring.md",
+                    "content": "# Recurring\n\n- [ ] water plants 🔁 every week 📅 2026-07-10\n",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("seed recurring note");
+        let recur = structured(
+            server
+                .call_tool(
+                    "tasks_complete",
+                    serde_json::json!({"path": "recurring.md", "line": 3, "done_date": "2026-07-12"}),
+                    &ctx,
+                )
+                .await
+                .expect("complete recurring"),
+        );
+        assert_eq!(recur["spawned_next_occurrence"], true);
+        assert_eq!(
+            recur["next_occurrence_line"],
+            "- [ ] water plants 🔁 every week 📅 2026-07-17",
+            "the due date advances by one week and the line is re-rendered"
+        );
+    }
+
+    #[cfg(feature = "tasks")]
+    #[tokio::test]
+    async fn tasks_module_tunes_itself_to_obsidian_tasks_settings() {
+        use turbovault_core::VaultConfig;
+
+        let temp = tempfile::TempDir::new().expect("temp vault");
+        // A real Obsidian Tasks settings file in the vault's config dir — the
+        // authoritative source the module reads through `VaultApi::read_config`.
+        let data_dir = temp
+            .path()
+            .join(".obsidian")
+            .join("plugins")
+            .join("obsidian-tasks-plugin");
+        std::fs::create_dir_all(&data_dir).expect("config dir");
+        std::fs::write(
+            data_dir.join("data.json"),
+            br##"{ "taskFormat": "dataview", "globalFilter": "#task" }"##,
+        )
+        .expect("write data.json");
+
+        let server = ObsidianMcpServer::new_with_plugins(vec![Arc::new(
+            turbovault_plugin_tasks::TasksPlugin,
+        )])
+        .expect("plugin composition");
+        let config = VaultConfig::builder("tuned", temp.path())
+            .build()
+            .expect("vault config");
+        server
+            .multi_vault()
+            .add_vault(config)
+            .await
+            .expect("register vault");
+        server
+            .multi_vault()
+            .set_active_vault("tuned")
+            .await
+            .expect("select vault");
+
+        let ctx = RequestContext::with_id("tuned-request");
+
+        // The authoritative settings win: dataview format, global filter `#task`.
+        let cfg = structured(
+            server
+                .call_tool("tasks_config", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_config"),
+        );
+        assert_eq!(cfg["source"], "obsidian-data");
+        assert_eq!(cfg["format"], "dataview");
+        assert_eq!(cfg["global_filter"], "#task");
+
+        // One task carries the global filter, one does not (and mentions "task"
+        // only in prose — which must not match a tag filter).
+        let note = "# Tasks\n\n\
+             - [ ] write tests #task 📅 2026-08-01\n\
+             - [ ] this is not a task really\n";
+        server
+            .call_tool(
+                "write_note",
+                serde_json::json!({"path": "t.md", "content": note}),
+                &ctx,
+            )
+            .await
+            .expect("seed note");
+
+        let all = structured(
+            server
+                .call_tool("tasks_list", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_list"),
+        );
+        assert_eq!(all["count"], 1, "global filter keeps only #task-bearing tasks");
+
+        // Edits render in the configured dataview dialect, not emoji.
+        let updated = structured(
+            server
+                .call_tool(
+                    "tasks_update",
+                    serde_json::json!({"path": "t.md", "line": 3, "priority": "high"}),
+                    &ctx,
+                )
+                .await
+                .expect("tasks_update"),
+        );
+        assert_eq!(updated["format"], "dataview");
+        let line_text = updated["line_text"].as_str().expect("line_text");
+        assert!(line_text.contains("[priority:: high]"), "{line_text}");
+        assert!(line_text.contains("[due:: 2026-08-01]"), "{line_text}");
+        assert!(
+            !line_text.contains('📅') && !line_text.contains('⏫'),
+            "dialect must be dataview, not emoji: {line_text}"
+        );
+    }
+
+    /// Live test: exercise `read_config` (and the global filter it resolves)
+    /// end-to-end against a real Obsidian vault.
+    ///
+    /// Fails closed: it is ignored by default, gated on `TURBOVAULT_LIVE_VAULT`,
+    /// and skips (rather than fails) unless that vault actually has an Obsidian
+    /// Tasks `data.json` to validate against — so there is never a spurious
+    /// failure when there is nothing real to check, and no machine-specific path
+    /// or private content lives in the suite. Run with:
+    ///   TURBOVAULT_LIVE_VAULT="/path/to/vault" \
+    ///     cargo test -p turbovault --features tasks --lib live_tasks \
+    ///     -- --ignored --nocapture
+    #[cfg(feature = "tasks")]
+    #[tokio::test]
+    #[ignore = "live: set TURBOVAULT_LIVE_VAULT to a real Obsidian vault"]
+    async fn live_tasks_against_real_obsidian_vault() {
+        use turbovault_core::VaultConfig;
+
+        let Ok(vault_path) = std::env::var("TURBOVAULT_LIVE_VAULT") else {
+            eprintln!("SKIP: set TURBOVAULT_LIVE_VAULT to a real vault path");
+            return;
+        };
+        // No real Tasks settings to read => nothing to validate => skip, don't fail.
+        let data_json = std::path::Path::new(&vault_path)
+            .join(".obsidian/plugins/obsidian-tasks-plugin/data.json");
+        if !data_json.exists() {
+            eprintln!("SKIP: {vault_path} has no Obsidian Tasks data.json");
+            return;
+        }
+
+        let server = ObsidianMcpServer::new_with_plugins(vec![Arc::new(
+            turbovault_plugin_tasks::TasksPlugin,
+        )])
+        .expect("plugin composition");
+        let vault_config = VaultConfig::builder("live", &vault_path)
+            .build()
+            .expect("vault config");
+        server
+            .multi_vault()
+            .add_vault(vault_config)
+            .await
+            .expect("register vault");
+        server
+            .multi_vault()
+            .set_active_vault("live")
+            .await
+            .expect("select vault");
+
+        let ctx = RequestContext::with_id("live");
+
+        // 1. read_config: the module must resolve settings from the real file.
+        let resolved = structured(
+            server
+                .call_tool("tasks_config", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_config"),
+        );
+        eprintln!("\n--- tasks_config against {vault_path} ---\n{resolved:#}\n");
+        assert_eq!(
+            resolved["source"], "obsidian-data",
+            "read_config must read the vault's real Tasks data.json"
+        );
+
+        // 2. Global filter: report the count (informational — a vault whose tasks
+        //    are all tagged would legitimately show no reduction, so "the count
+        //    shrank" is NOT a sound criterion). The sound, content-independent
+        //    invariant is that every task the filter *returns* carries the filter
+        //    tag — unless the config strips it from the rendered tags.
+        let listed = structured(
+            server
+                .call_tool("tasks_list", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_list"),
+        );
+        let count = listed["count"].as_u64().unwrap_or(0);
+        let global_filter = resolved["global_filter"].as_str().unwrap_or("");
+        eprintln!("tasks_list: {count} tasks match global filter {global_filter:?}");
+
+        let strips_tag = resolved["remove_global_filter"].as_bool().unwrap_or(false);
+        if let Some(tag) = global_filter.strip_prefix('#').filter(|_| !strips_tag) {
+            let tasks = listed["tasks"].as_array().cloned().unwrap_or_default();
+            for task in &tasks {
+                let carries_tag = task["tags"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .any(|value| value.eq_ignore_ascii_case(tag));
+                assert!(
+                    carries_tag,
+                    "a filtered task is missing the global-filter tag #{tag}"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "plugin-api")]

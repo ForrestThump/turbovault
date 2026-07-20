@@ -108,6 +108,12 @@ pub trait VaultHost: Send + Sync {
     /// Obsidian Tasks plugin's `data.json` — instead of requiring the settings
     /// to be duplicated into module config.
     ///
+    /// It is deliberately name-addressed, not enumerable: a module reads a
+    /// config path it already knows (every plugin knows its own settings path),
+    /// so this cannot be used to discover and sweep other plugins' secrets.
+    /// `None` is a normal outcome (the target app/plugin may not be installed);
+    /// the caller decides whether that is recoverable or fatal.
+    ///
     /// Hosts enforce read scoping and path-traversal safety, and MAY decline the
     /// capability entirely; the default implementation returns `None` so that a
     /// host which does not support config reads degrades gracefully rather than
