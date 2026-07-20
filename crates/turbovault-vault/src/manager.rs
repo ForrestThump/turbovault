@@ -187,6 +187,20 @@ impl VaultManager {
         content: &str,
         expected_hash: Option<&str>,
     ) -> Result<()> {
+        self.write_file_with_metadata(path, content, expected_hash, None)
+            .await
+    }
+
+    /// Like [`write_file`](Self::write_file), but attaches `metadata` to the
+    /// recorded audit entry (used for provenance / attribution).
+    #[instrument(skip(self, content, metadata), fields(file = ?path, size = content.len()), name = "vault_write_file_meta")]
+    pub async fn write_file_with_metadata(
+        &self,
+        path: &Path,
+        content: &str,
+        expected_hash: Option<&str>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<()> {
         use crate::edit::compute_hash;
 
         let vault_path = self.resolve_path(path)?;
@@ -266,6 +280,10 @@ impl VaultManager {
                     entry = entry.with_after(SnapshotStore::compute_hash(content), snap_id);
                 }
                 Err(e) => log::warn!("Failed to store after-snapshot: {}", e),
+            }
+
+            if let Some(metadata) = metadata {
+                entry = entry.with_metadata(metadata);
             }
 
             if let Err(e) = audit_log.record(&entry).await {
@@ -404,6 +422,18 @@ impl VaultManager {
     /// Delete file from vault with audit trail, graph cleanup, and optional concurrency check.
     #[instrument(skip(self), fields(file = ?path), name = "vault_delete_file")]
     pub async fn delete_file(&self, path: &Path, expected_hash: Option<&str>) -> Result<()> {
+        self.delete_file_with_metadata(path, expected_hash, None)
+            .await
+    }
+
+    /// Like [`delete_file`](Self::delete_file), but attaches `metadata` to the
+    /// recorded audit entry (used for provenance / attribution).
+    pub async fn delete_file_with_metadata(
+        &self,
+        path: &Path,
+        expected_hash: Option<&str>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<()> {
         use crate::edit::compute_hash;
 
         let vault_path = self.resolve_path(path)?;
@@ -459,6 +489,10 @@ impl VaultManager {
                 }
             }
 
+            if let Some(metadata) = metadata {
+                entry = entry.with_metadata(metadata);
+            }
+
             if let Err(e) = audit_log.record(&entry).await {
                 log::warn!("Failed to record audit entry: {}", e);
             }
@@ -474,6 +508,19 @@ impl VaultManager {
         from: &Path,
         to: &Path,
         expected_hash: Option<&str>,
+    ) -> Result<()> {
+        self.move_file_with_metadata(from, to, expected_hash, None)
+            .await
+    }
+
+    /// Like [`move_file`](Self::move_file), but attaches `metadata` to the
+    /// recorded audit entry (used for provenance / attribution).
+    pub async fn move_file_with_metadata(
+        &self,
+        from: &Path,
+        to: &Path,
+        expected_hash: Option<&str>,
+        metadata: Option<serde_json::Value>,
     ) -> Result<()> {
         use crate::edit::compute_hash;
         use sha2::{Digest, Sha256};
@@ -586,6 +633,10 @@ impl VaultManager {
                     }
                     Err(e) => log::warn!("Failed to store snapshot: {}", e),
                 }
+            }
+
+            if let Some(metadata) = metadata {
+                entry = entry.with_metadata(metadata);
             }
 
             if let Err(e) = audit_log.record(&entry).await {
