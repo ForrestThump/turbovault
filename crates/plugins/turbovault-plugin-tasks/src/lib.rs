@@ -13,6 +13,7 @@
 //!
 //! | local name | kind | notes |
 //! |---|---|---|
+//! | `create`   | write | create a task line in a note (global-filter tag applied automatically) |
 //! | `list`     | read  | all/pending/completed, optional tag filter |
 //! | `overdue`  | read  | pending tasks past `due_date`, oldest first |
 //! | `tags`     | read  | distinct inline task tags across the vault |
@@ -37,7 +38,7 @@ mod config;
 mod recurrence;
 mod render;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -94,6 +95,26 @@ pub struct TasksProvider {
 impl PluginProvider for TasksProvider {
     fn tools(&self) -> Vec<Tool> {
         vec![
+            tool(
+                "create",
+                "Create a new task line in a note. Appends after existing tasks (or end of note if none). The configured global filter tag (e.g. #task) is added to the task's tags automatically — you never need to pass it yourself.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Vault-relative note path to write the task into" },
+                        "content": { "type": "string", "description": "The task description text (just the prose — no checkbox, priority, dates, or tags; those come from the other parameters)" },
+                        "priority": { "type": "string", "description": "highest | high | medium | low | lowest | normal" },
+                        "due": { "type": "string", "description": "Due date, YYYY-MM-DD" },
+                        "scheduled": { "type": "string", "description": "Scheduled date, YYYY-MM-DD" },
+                        "start": { "type": "string", "description": "Start date, YYYY-MM-DD" },
+                        "recurrence": { "type": "string", "description": "Recurrence rule, e.g. 'every week' or 'every 2 days'" },
+                        "tags": { "type": "array", "items": { "type": "string" }, "description": "Additional inline tags (leading # optional). The global filter tag is added automatically — do not include it here." },
+                        "insert_after_line": { "type": "integer", "minimum": 1, "description": "Insert the task after this 1-based line number (default: after the last existing task in the note, or end of note if there are none)" },
+                        "expected_version": { "type": "string", "description": "Optimistic-concurrency token from a prior read; rejected if the note has changed" }
+                    },
+                    "required": ["path", "content"]
+                }),
+            ),
             tool(
                 "list",
                 "List tasks across the active vault, optionally filtered by status and tags",
@@ -199,6 +220,7 @@ impl PluginProvider for TasksProvider {
         context: PluginRequestContext,
     ) -> PluginResult<ToolResult> {
         match name {
+            "create" => self.create(&arguments, &context).await,
             "list" => self.list(&arguments).await,
             "overdue" => self.overdue(&arguments).await,
             "tags" => self.tags().await,
@@ -259,13 +281,134 @@ impl TasksProvider {
         sample
     }
 
+    /// Create a new task line in a note. Always injects the global-filter tag
+    /// (e.g. `#task`) so the agent never needs to know about it. Renders in the
+    /// vault's detected dialect (emoji or Dataview).
+    async fn create(
+        &self,
+        args: &Value,
+        context: &PluginRequestContext,
+    ) -> PluginResult<ToolResult> {
+        let path = required_str(args, "path")?;
+        let content = required_str(args, "content")?.to_string();
+        if content.trim().is_empty() {
+            return Err(PluginError::invalid_input("content must not be empty"));
+        }
+
+        let snapshot = self.vault.read_note(path).await?;
+        verify_version(args, &snapshot.version)?;
+
+        let (format, global_filter) = {
+            let config = self.config().await;
+            (config.format, config.global_filter.clone())
+        };
+
+        let mut task = TaskItem {
+            content,
+            is_completed: false,
+            position: Default::default(),
+            created_date: None,
+            scheduled_date: None,
+            start_date: None,
+            due_date: None,
+            done_date: None,
+            cancelled_date: None,
+            priority: TaskPriority::Normal,
+            recurrence: None,
+            on_completion: None,
+            id: None,
+            depends_on: Vec::new(),
+            tags: Vec::new(),
+            block_ref: None,
+            metadata: HashMap::new(),
+        };
+
+        apply_edits(&mut task, args)?;
+
+        // Always inject the global-filter tag — the agent never needs to pass it.
+        if let Some(filter) = &global_filter {
+            if let Some(tag) = filter.strip_prefix('#') {
+                let tag = tag.to_string();
+                if !task.tags.iter().any(|t| t.eq_ignore_ascii_case(&tag)) {
+                    task.tags.push(tag);
+                }
+            }
+        }
+
+        let separator = line_sep(&snapshot.content);
+        let mut lines: Vec<String> =
+            snapshot.content.split(separator).map(str::to_string).collect();
+
+        // Determine insertion line: after the specified line, after the last
+        // existing task, or at end of note.
+        let insert_after = if let Some(line) = args
+            .get("insert_after_line")
+            .and_then(Value::as_u64)
+            .filter(|n| *n >= 1)
+        {
+            line as usize
+        } else {
+            let parsed = turbovault_parser::parse_tasks(&snapshot.content);
+            parsed
+                .iter()
+                .map(|t| t.position.line)
+                .max()
+                .unwrap_or(lines.len())
+        };
+
+        // Borrow indentation and list marker from the line being inserted after.
+        let (indent, marker) = if insert_after > 0 && insert_after <= lines.len() {
+            split_list_prefix(&lines[insert_after - 1])
+        } else {
+            (String::new(), "-".to_string())
+        };
+
+        let new_line = format!(
+            "{indent}{marker} [ ] {}",
+            render::render_body(&task, format)
+        );
+
+        let insertion_line = if insert_after >= lines.len() {
+            lines.push(new_line.clone());
+            lines.len()
+        } else {
+            lines.insert(insert_after, new_line.clone());
+            insert_after + 1
+        };
+
+        let new_content = lines.join(separator);
+
+        let receipt = self
+            .vault
+            .write_note(WriteNoteRequest {
+                path: path.to_string(),
+                content: new_content,
+                precondition: WritePrecondition::Match(snapshot.version.clone()),
+                commit_message: Some(format!("tasks: create {path}:{insertion_line}")),
+                provenance: Some(provenance(
+                    context,
+                    format!("create {path}:{insertion_line}"),
+                )),
+            })
+            .await?;
+
+        ok_json(json!({
+            "path": path,
+            "line": insertion_line,
+            "line_text": new_line,
+            "format": format_name(format),
+            "global_filter_applied": global_filter.is_some(),
+            "version": receipt.version,
+        }))
+    }
+
     /// Read every markdown note and parse its tasks, tagged with the note path.
     /// Honors the resolved global filter, so results mirror what the user's
     /// Tasks plugin considers a task.
     async fn read_all_tasks(&self) -> PluginResult<Vec<(String, TaskItem)>> {
-        let (global_filter, remove_global_filter) = {
+        let global_filter = {
             let config = self.config().await;
-            (config.global_filter.clone(), config.remove_global_filter)
+            config.global_filter.clone()
         };
 
         let notes = self.vault.list_notes().await?;
@@ -279,7 +422,7 @@ impl TasksProvider {
             let Ok(snapshot) = self.vault.read_note(&path).await else {
                 continue;
             };
-            for mut task in turbovault_parser::parse_tasks(&snapshot.content) {
+            for task in turbovault_parser::parse_tasks(&snapshot.content) {
                 if let Some(filter) = &global_filter {
                     if let Some(tag) = filter.strip_prefix('#') {
                         // A tag filter (the Obsidian default) matches on the tag
@@ -287,9 +430,6 @@ impl TasksProvider {
                         let tag = tag.to_ascii_lowercase();
                         if !task.tags.iter().any(|value| value.eq_ignore_ascii_case(&tag)) {
                             continue;
-                        }
-                        if remove_global_filter {
-                            task.tags.retain(|value| !value.eq_ignore_ascii_case(&tag));
                         }
                     } else {
                         // A non-tag filter is a literal substring of the task text.
