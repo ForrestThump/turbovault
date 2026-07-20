@@ -6487,6 +6487,7 @@ dependencies = [
  "turbovault-audit",
  "turbovault-core",
  "turbovault-plugin-api",
+ "turbovault-plugin-vector",
  "turbovault-tools",
  "turbovault-vault",
  "uuid",
@@ -6608,6 +6609,19 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "turbomcp-types",
+]
+
+[[package]]
+name = "turbovault-plugin-vector"
+version = "1.6.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+ "turbomcp-types",
+ "turbovault-plugin-api",
+ "turbovault-vector",
 ]
 
 [[package]]

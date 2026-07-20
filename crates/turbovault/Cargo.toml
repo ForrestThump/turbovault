@@ -44,6 +44,10 @@ sql = ["turbovault-tools/sql"]
 # crates/plugins/ must include this feature and remain default-off.
 plugin-api = ["dep:async-trait", "dep:turbovault-plugin-api"]
 
+# Vector module: semantic search as a namespaced `vector_*` vertical.
+# Default-off; enables the plugin boundary and compiles in the module crate.
+vector = ["plugin-api", "dep:turbovault-plugin-vector"]
+
 # Convenience bundles
 http-full = ["http", "websocket"]            # HTTP + WebSocket
 # Note: unix is excluded from all-transports on Windows (not supported)
@@ -61,6 +65,7 @@ turbovault-vault = { workspace = true }
 turbovault-audit = { workspace = true }
 turbovault-tools = { workspace = true }
 turbovault-plugin-api = { workspace = true, optional = true }
+turbovault-plugin-vector = { workspace = true, optional = true }
 
 # MCP server framework (features passed through from turbovault)
 turbomcp = { workspace = true, features = ["stdio", "telemetry"] }
