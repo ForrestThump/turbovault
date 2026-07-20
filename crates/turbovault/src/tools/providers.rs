@@ -928,6 +928,110 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "vector")]
+    #[tokio::test]
+    async fn vector_module_serves_namespaced_tools() {
+        let server = ObsidianMcpServer::new_with_plugins(vec![Arc::new(
+            turbovault_plugin_vector::VectorPlugin,
+        )])
+        .expect("plugin composition");
+
+        let advertised = server.list_tools();
+        assert_eq!(advertised.len(), 78, "base 74 + 4 vector tools");
+        let mut vector_tools: Vec<&str> = advertised
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .filter(|name| name.starts_with("vector_"))
+            .collect();
+        vector_tools.sort();
+        // Exactly the four namespaced tools (core already owns generic names like
+        // `search`/`status`, so the invariant is "our tools are namespaced", not
+        // "these words are absent").
+        assert_eq!(
+            vector_tools,
+            [
+                "vector_config",
+                "vector_reindex",
+                "vector_search",
+                "vector_status"
+            ]
+        );
+
+        // vector_config is cheap — no vault, no model load.
+        let ctx = RequestContext::with_id("vector-config");
+        let cfg = structured(
+            server
+                .call_tool("vector_config", serde_json::json!({}), &ctx)
+                .await
+                .expect("vector_config"),
+        );
+        assert_eq!(cfg["source"], "default");
+        assert!(cfg["model"].is_string());
+    }
+
+    /// Live: real embeddings + search over a real vault. Ignored, env-gated,
+    /// fail-closed. Downloads a fastembed model on first run.
+    ///   TURBOVAULT_LIVE_VAULT="/path" [TURBOVAULT_LIVE_QUERY="..."] \
+    ///     cargo test -p turbovault --features vector --lib live_vector_search \
+    ///     -- --ignored --nocapture
+    #[cfg(feature = "vector")]
+    #[tokio::test]
+    #[ignore = "live: set TURBOVAULT_LIVE_VAULT to a real Obsidian vault"]
+    async fn live_vector_search_over_real_vault() {
+        use turbovault_core::VaultConfig;
+
+        let Ok(vault_path) = std::env::var("TURBOVAULT_LIVE_VAULT") else {
+            eprintln!("SKIP: set TURBOVAULT_LIVE_VAULT to a real vault path");
+            return;
+        };
+        let query = std::env::var("TURBOVAULT_LIVE_QUERY")
+            .unwrap_or_else(|_| "notes about projects and goals".to_string());
+
+        let server = ObsidianMcpServer::new_with_plugins(vec![Arc::new(
+            turbovault_plugin_vector::VectorPlugin,
+        )])
+        .expect("plugin composition");
+        let config = VaultConfig::builder("live", &vault_path)
+            .build()
+            .expect("vault config");
+        server
+            .multi_vault()
+            .add_vault(config)
+            .await
+            .expect("register vault");
+        server
+            .multi_vault()
+            .set_active_vault("live")
+            .await
+            .expect("select vault");
+
+        let ctx = RequestContext::with_id("live-vector");
+        let result = structured(
+            server
+                .call_tool(
+                    "vector_search",
+                    serde_json::json!({"query": query, "k": 5}),
+                    &ctx,
+                )
+                .await
+                .expect("vector_search"),
+        );
+        eprintln!("\n--- vector_search {query:?} over {vault_path} ---");
+        if let Some(hits) = result["results"].as_array() {
+            for hit in hits {
+                eprintln!(
+                    "  {:.3}  {}",
+                    hit["score"].as_f64().unwrap_or(0.0),
+                    hit["note_path"].as_str().unwrap_or("?")
+                );
+            }
+        }
+        assert!(
+            result["count"].as_u64().unwrap_or(0) > 0,
+            "expected at least one hit over a real vault"
+        );
+    }
+
     #[cfg(feature = "plugin-api")]
     #[test]
     fn duplicate_plugin_namespaces_are_rejected_before_serving() {
