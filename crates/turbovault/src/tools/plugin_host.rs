@@ -15,18 +15,11 @@ use super::CoreToolHandler;
 pub(super) struct PluginVaultHost {
     core: CoreToolHandler,
     hooks: HookBus,
-    /// Validated descriptor id of the plugin this host serves; scopes the
-    /// plugin-private state directory.
-    plugin_id: String,
 }
 
 impl PluginVaultHost {
-    pub(super) fn new(core: CoreToolHandler, hooks: HookBus, plugin_id: String) -> Self {
-        Self {
-            core,
-            hooks,
-            plugin_id,
-        }
+    pub(super) fn new(core: CoreToolHandler, hooks: HookBus) -> Self {
+        Self { core, hooks }
     }
 }
 
@@ -94,31 +87,6 @@ impl VaultHost for PluginVaultHost {
             .collect::<Vec<_>>();
         notes.sort();
         Ok(notes)
-    }
-
-    async fn list_notes_meta(&self) -> PluginResult<Vec<(String, i64)>> {
-        let manager = self
-            .core
-            .get_active_vault_manager()
-            .await
-            .map_err(map_host_error)?;
-        let mut out = manager
-            .scan_vault()
-            .await
-            .map_err(map_core_error)?
-            .iter()
-            .map(|path| {
-                let mtime = std::fs::metadata(path)
-                    .and_then(|meta| meta.modified())
-                    .ok()
-                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|dur| dur.as_millis() as i64)
-                    .unwrap_or(0);
-                (manager.relative_path(path), mtime)
-            })
-            .collect::<Vec<_>>();
-        out.sort();
-        Ok(out)
     }
 
     async fn read_note(&self, path: &str) -> PluginResult<NoteSnapshot> {
@@ -230,7 +198,9 @@ impl VaultHost for PluginVaultHost {
         // read `.obsidian/**` (their settings live there); everything else stays
         // behind the note APIs.
         let normalized = relative_path.replace('\\', "/");
-        if normalized != ".obsidian" && !normalized.starts_with(".obsidian/") {
+        if normalized != ".obsidian"
+            && !normalized.starts_with(".obsidian/")
+        {
             return Err(PluginError::invalid_input(format!(
                 "read_config is scoped to `.obsidian/`; refused {relative_path:?}"
             )));
@@ -252,36 +222,8 @@ impl VaultHost for PluginVaultHost {
             Err(error) => Err(PluginError::internal(error.to_string())),
         }
     }
-
-    async fn plugin_state_dir(&self) -> PluginResult<std::path::PathBuf> {
-        // Per-vault, plugin-private state under the active vault's `.turbovault/`.
-        // Created on demand; the plugin owns read/write within it and nothing else.
-        let manager = self
-            .core
-            .get_active_vault_manager()
-            .await
-            .map_err(map_host_error)?;
-        let dir = manager
-            .vault_path()
-            .join(".turbovault")
-            .join("plugins")
-            .join(&self.plugin_id);
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(|error| PluginError::internal(error.to_string()))?;
-        // Keep derived state out of git.
-        let gitignore = manager.vault_path().join(".turbovault").join(".gitignore");
-        if !tokio::fs::try_exists(&gitignore).await.unwrap_or(false) {
-            let _ = tokio::fs::write(&gitignore, "*\n").await;
-        }
-        Ok(dir)
-    }
 }
 
-pub(super) fn vault_host(
-    core: CoreToolHandler,
-    hooks: HookBus,
-    plugin_id: String,
-) -> Arc<dyn VaultHost> {
-    Arc::new(PluginVaultHost::new(core, hooks, plugin_id))
+pub(super) fn vault_host(core: CoreToolHandler, hooks: HookBus) -> Arc<dyn VaultHost> {
+    Arc::new(PluginVaultHost::new(core, hooks))
 }

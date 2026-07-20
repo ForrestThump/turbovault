@@ -79,20 +79,6 @@ pub trait VaultHost: Send + Sync {
     /// List markdown note paths in the active vault.
     async fn list_notes(&self) -> PluginResult<Vec<String>>;
 
-    /// List note paths paired with their modification time (ms since epoch).
-    ///
-    /// The cheap change-detection primitive: a module compares these against its
-    /// own last-seen mtimes to find which notes to re-read, without reading every
-    /// note. Default derives mtimes as `0` (host declines); real hosts stat.
-    async fn list_notes_meta(&self) -> PluginResult<Vec<(String, i64)>> {
-        Ok(self
-            .list_notes()
-            .await?
-            .into_iter()
-            .map(|path| (path, 0))
-            .collect())
-    }
-
     /// Read a complete note and its opaque version.
     async fn read_note(&self, path: &str) -> PluginResult<NoteSnapshot>;
 
@@ -108,29 +94,18 @@ pub trait VaultHost: Send + Sync {
     /// Obsidian Tasks plugin's `data.json` — instead of requiring the settings
     /// to be duplicated into module config.
     ///
+    /// It is deliberately name-addressed, not enumerable: a module reads a
+    /// config path it already knows (every plugin knows its own settings path),
+    /// so this cannot be used to discover and sweep other plugins' secrets.
+    /// `None` is a normal outcome (the target app/plugin may not be installed);
+    /// the caller decides whether that is recoverable or fatal.
+    ///
     /// Hosts enforce read scoping and path-traversal safety, and MAY decline the
     /// capability entirely; the default implementation returns `None` so that a
     /// host which does not support config reads degrades gracefully rather than
     /// erroring. The path is vault-relative and uses `/` separators.
     async fn read_config(&self, _relative_path: &str) -> PluginResult<Option<Vec<u8>>> {
         Ok(None)
-    }
-
-    /// Return an absolute path to a **per-vault, plugin-private** state directory,
-    /// creating it on demand.
-    ///
-    /// This is the read-write counterpart to the read-only note/config APIs: a
-    /// module owns this directory (and only this directory) for derived state
-    /// that is neither notes nor app config — a search index, a cache, a sidecar
-    /// database. It is scoped to the active vault (state for vault A must not
-    /// collide with vault B) and to the plugin's own id.
-    ///
-    /// The default errors: a host that provides no plugin storage cannot
-    /// synthesize a safe location, so modules that require it fail loudly.
-    async fn plugin_state_dir(&self) -> PluginResult<std::path::PathBuf> {
-        Err(crate::PluginError::unavailable(
-            "this host does not provide plugin state storage",
-        ))
     }
 }
 
@@ -162,11 +137,6 @@ impl VaultApi {
         self.host.list_notes().await
     }
 
-    /// List note paths paired with their modification time (ms since epoch).
-    pub async fn list_notes_meta(&self) -> PluginResult<Vec<(String, i64)>> {
-        self.host.list_notes_meta().await
-    }
-
     /// Read a complete note and its opaque version.
     pub async fn read_note(&self, path: &str) -> PluginResult<NoteSnapshot> {
         self.host.read_note(path).await
@@ -181,11 +151,5 @@ impl VaultApi {
     /// returning `None` when it does not exist or the host declines the read.
     pub async fn read_config(&self, relative_path: &str) -> PluginResult<Option<Vec<u8>>> {
         self.host.read_config(relative_path).await
-    }
-
-    /// Absolute path to this plugin's per-vault private state directory, created
-    /// on demand. Read-write, owned by the module.
-    pub async fn plugin_state_dir(&self) -> PluginResult<std::path::PathBuf> {
-        self.host.plugin_state_dir().await
     }
 }

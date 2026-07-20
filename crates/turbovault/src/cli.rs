@@ -163,12 +163,12 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     // Create vault-agnostic server instance (no vault required at startup).
     // Compiled-in plugin modules (default-off features) are registered here.
-    #[cfg(feature = "vector")]
+    #[cfg(feature = "tasks")]
     let server = ObsidianMcpServer::new_with_plugins(vec![std::sync::Arc::new(
-        turbovault_plugin_vector::VectorPlugin,
+        turbovault_plugin_tasks::TasksPlugin,
     )])
     .map_err(|e| format!("Failed to create MCP server: {}", e))?;
-    #[cfg(not(feature = "vector"))]
+    #[cfg(not(feature = "tasks"))]
     let server =
         ObsidianMcpServer::new().map_err(|e| format!("Failed to create MCP server: {}", e))?;
 
