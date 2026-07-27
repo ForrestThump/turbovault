@@ -82,12 +82,28 @@ impl FileTools {
         expected_hash: Option<&str>,
         message: &str,
     ) -> Result<()> {
+        self.write_file_with_mode_and_metadata(path, content, mode, expected_hash, message, None)
+            .await
+    }
+
+    /// [`write_file_with_mode`](Self::write_file_with_mode), plus opaque `metadata` recorded on the
+    /// resulting audit entry. Append/Prepend compose their content first, so the metadata lands on
+    /// the single write each mode ultimately performs.
+    pub async fn write_file_with_mode_and_metadata(
+        &self,
+        path: &str,
+        content: &str,
+        mode: WriteMode,
+        expected_hash: Option<&str>,
+        message: &str,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<()> {
         let precondition = Precondition::for_replace(expected_hash, true);
         match mode {
             WriteMode::Overwrite => {
                 let file_path = PathBuf::from(path);
                 self.manager
-                    .write_file(&file_path, content, precondition, message)
+                    .write_file_with_metadata(&file_path, content, precondition, message, metadata)
                     .await
             }
             WriteMode::Append => {
@@ -99,7 +115,13 @@ impl FileTools {
                 };
                 let file_path = PathBuf::from(path);
                 self.manager
-                    .write_file(&file_path, &combined, precondition, message)
+                    .write_file_with_metadata(
+                        &file_path,
+                        &combined,
+                        precondition,
+                        message,
+                        metadata,
+                    )
                     .await
             }
             WriteMode::Prepend => {
@@ -108,7 +130,13 @@ impl FileTools {
                     let file_path = PathBuf::from(path);
                     return self
                         .manager
-                        .write_file(&file_path, content, precondition, message)
+                        .write_file_with_metadata(
+                            &file_path,
+                            content,
+                            precondition,
+                            message,
+                            metadata,
+                        )
                         .await;
                 }
 
@@ -132,7 +160,13 @@ impl FileTools {
                 };
                 let file_path = PathBuf::from(path);
                 self.manager
-                    .write_file(&file_path, &combined, precondition, message)
+                    .write_file_with_metadata(
+                        &file_path,
+                        &combined,
+                        precondition,
+                        message,
+                        metadata,
+                    )
                     .await
             }
         }
@@ -157,12 +191,26 @@ impl FileTools {
     /// route through (write-substrate-layering M4d). `message` is the git
     /// commit subject (ignored on direct).
     pub async fn create_file(&self, path: &str, content: &str, message: &str) -> Result<()> {
+        self.create_file_with_metadata(path, content, message, None)
+            .await
+    }
+
+    /// [`create_file`](Self::create_file), plus opaque `metadata` recorded on the resulting audit
+    /// entry.
+    pub async fn create_file_with_metadata(
+        &self,
+        path: &str,
+        content: &str,
+        message: &str,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<()> {
         self.manager
-            .write_file(
+            .write_file_with_metadata(
                 &PathBuf::from(path),
                 content,
                 Precondition::ExpectAbsent,
                 message,
+                metadata,
             )
             .await
     }

@@ -4,6 +4,15 @@ use std::ops::Deref;
 
 use super::super::*;
 
+/// Context key under which a `tools/call` request's wire-level `_meta` object is surfaced to
+/// handlers.
+///
+/// Spelled here rather than imported so this compiles against any turbomcp: `_meta` is the MCP
+/// spec's open, implementation-defined per-request object, and a server that does not surface it
+/// simply leaves the key absent. (turbomcp exports the same constant once its router threads
+/// `_meta`; this can become an import then.)
+const REQUEST_META_KEY: &str = "_meta";
+
 #[derive(Clone)]
 pub(super) struct FileProvider(CoreToolHandler);
 
@@ -70,6 +79,7 @@ impl FileProvider {
         expected_hash: Option<String>,
         force: Option<bool>,
         commit_message: Option<String>,
+        ctx: &RequestContext,
     ) -> McpResult<serde_json::Value> {
         let write_mode = WriteMode::from_str_opt(mode.as_deref()).map_err(to_mcp_error)?;
         let prepared = self
@@ -80,6 +90,14 @@ impl FileProvider {
         let message = prepared.message;
         let force = force.unwrap_or(false);
         let files = FileTools::new(manager.clone());
+        // Forward the request's `_meta` onto the write's audit entry. Turbovault does not interpret
+        // it -- `_meta` is the MCP spec's open per-request slot, and recording it lets a caller
+        // attach provenance/correlation that a consumer reads back from the audit log to attribute
+        // a change to its originator (and so avoid reacting to its own writes).
+        //
+        // Inert against a server that does not surface `_meta`: the key is simply absent and this
+        // is `None`, which is exactly the previous behaviour.
+        let request_meta = ctx.get_metadata(REQUEST_META_KEY).cloned();
 
         // Create-by-default (backend-agnostic since M4d): no force, no hash, and
         // a full overwrite means "create a new note". The filesystem pre-check
@@ -95,17 +113,18 @@ impl FileProvider {
                 )));
             }
             files
-                .create_file(&path, &content, &message)
+                .create_file_with_metadata(&path, &content, &message, request_meta)
                 .await
                 .map_err(to_mcp_error)?;
         } else {
             files
-                .write_file_with_mode(
+                .write_file_with_mode_and_metadata(
                     &path,
                     &content,
                     write_mode,
                     expected_hash.as_deref(),
                     &message,
+                    request_meta,
                 )
                 .await
                 .map_err(to_mcp_error)?;

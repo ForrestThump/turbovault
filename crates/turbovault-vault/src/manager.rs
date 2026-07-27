@@ -538,12 +538,32 @@ impl VaultManager {
         precondition: Precondition,
         message: &str,
     ) -> Result<()> {
+        self.write_file_with_metadata(path, content, precondition, message, None)
+            .await
+    }
+
+    /// [`write_file`](Self::write_file), plus opaque `metadata` recorded on the resulting audit
+    /// entry (see [`ChangePlan::metadata`]). Turbovault does not interpret it; a caller uses it to
+    /// record who caused the write, so a reactive consumer can later tell that change apart from a
+    /// human's and avoid reacting to its own output.
+    #[instrument(skip(self, content, metadata), fields(file = ?path, size = content.len()), name = "vault_write_file_meta")]
+    pub async fn write_file_with_metadata(
+        &self,
+        path: &Path,
+        content: &str,
+        precondition: Precondition,
+        message: &str,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<()> {
         let vault_path = self.resolve_path(path)?;
         let rel_path = self.relative_path(&vault_path);
 
-        let plan = ChangePlan::new(message)
+        let mut plan = ChangePlan::new(message)
             .upsert(rel_path.clone(), content.as_bytes())
             .with_precondition(rel_path, precondition);
+        if let Some(metadata) = metadata {
+            plan = plan.with_metadata(metadata);
+        }
 
         let outcome = self.substrate.apply(&plan).await?;
         self.sync_index(&outcome.changed).await;
