@@ -63,7 +63,7 @@ impl VaultHost for PluginVaultHost {
             .await
             .map_err(map_core_error)?;
         let write_backend = match config.write_backend {
-            WriteBackend::Legacy => "legacy",
+            WriteBackend::Direct => "direct",
             WriteBackend::Git => "git",
         };
         Ok(VaultDescriptor {
@@ -109,48 +109,48 @@ impl VaultHost for PluginVaultHost {
     }
 
     async fn write_note(&self, request: WriteNoteRequest) -> PluginResult<WriteReceipt> {
-        let vault = self
+        let prepared = self
             .core
-            .get_active_vault_name()
+            .prepare_complete_note_write(
+                &request.path,
+                request.commit_message.clone(),
+                "plugin write",
+            )
             .await
             .map_err(map_host_error)?;
-        let manager = self
-            .core
-            .get_active_vault_manager()
-            .await
-            .map_err(map_host_error)?;
-        let tools = self
-            .core
-            .get_active_write_tools()
-            .await
-            .map_err(map_host_error)?;
+        let vault = prepared.vault_name;
+        let manager = prepared.manager;
+        let message = prepared.message;
         let resolved_path = manager
             .resolve_path(Path::new(&request.path))
             .map_err(map_core_error)?;
-        let message = self
-            .core
-            .resolve_commit_message(request.commit_message.clone(), || {
-                format!("plugin write {}", request.path)
-            })
-            .await
-            .map_err(map_host_error)?;
+        let files = FileTools::new(manager.clone());
 
         match &request.precondition {
+            // CreateOnly → ExpectAbsent (create_file). The filesystem pre-check
+            // keeps the friendly conflict message on the direct path; ExpectAbsent
+            // is the TOCTOU-safe backstop on both substrates.
             WritePrecondition::CreateOnly => {
-                if !tools.is_git() && tokio::fs::try_exists(&resolved_path).await.unwrap_or(false) {
+                let is_git = self
+                    .core
+                    .active_vault_is_git()
+                    .await
+                    .map_err(map_host_error)?;
+                if !is_git && tokio::fs::try_exists(&resolved_path).await.unwrap_or(false) {
                     return Err(PluginError::conflict(format!(
                         "create refused: {:?} already exists",
                         request.path
                     )));
                 }
-                tools
-                    .create_file_with_message(&request.path, &request.content, &message)
+                files
+                    .create_file(&request.path, &request.content, &message)
                     .await
                     .map_err(map_core_error)?;
             }
+            // Match(version) → ExpectBlob (write_file_with_mode carries the token).
             WritePrecondition::Match(version) => {
-                tools
-                    .write_file_with_mode_and_message(
+                files
+                    .write_file_with_mode(
                         &request.path,
                         &request.content,
                         WriteMode::Overwrite,
@@ -162,8 +162,7 @@ impl VaultHost for PluginVaultHost {
             }
         }
 
-        self.core.invalidate_similarity_cache().await;
-        self.core.invalidate_search_cache().await;
+        self.core.finish_complete_note_write().await;
         let version = self
             .core
             .hash_for_active_backend(&request.content)

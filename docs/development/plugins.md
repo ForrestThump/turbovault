@@ -1,8 +1,9 @@
 # Plugin Architecture
 
 TurboVault's v1 plugin model is compiled-in, Cargo-feature-gated Rust. It is a
-curated extension surface: plugins are reviewed and shipped with TurboVault.
-There is no dynamic loader, FFI boundary, sandbox, or runtime installation.
+curated extension surface: plugins are reviewed and shipped with TurboVault as
+optional Cargo features. There is no dynamic loader, FFI boundary, sandbox, or
+runtime installation.
 
 ## Boundary
 
@@ -16,7 +17,7 @@ managers. A plugin factory receives:
 
 `VaultApi` requires every write to choose `CreateOnly` or `Match(version)`.
 There is intentionally no blind-overwrite escape hatch. Version tokens are
-opaque and backend-native: SHA-256 on the legacy backend and Git blob IDs on
+opaque and backend-native: SHA-256 on the direct backend and Git blob IDs on
 the Git backend.
 
 Plugins receive a curated request context containing request, user, session,
@@ -42,6 +43,15 @@ TurboMCP's clone-based composite handler.
 Core tool names stay flat for compatibility. Plugin tools are always
 advertised as `<plugin_id>_<local_tool>`. A `list_tasks` tool owned by the
 `tasks` plugin is therefore `tasks_list_tasks`.
+
+When at least one plugin is registered, MCP `serverInfo.description` lists its
+namespaces and explains that naming convention. The default server omits that
+guidance entirely. The exact enabled catalog remains authoritative through
+`tools/list`.
+
+Plugin-local and fully namespaced names are validated at registration against
+[MCP SEP-986](https://modelcontextprotocol.io/seps/986-specify-format-for-tool-names):
+1–64 ASCII letters, digits, underscores, dashes, dots, or forward slashes.
 
 ## Hook lifecycle and backpressure
 
@@ -75,5 +85,7 @@ any other in-tree public API; it does not need to be forced through `VaultApi`.
 - Depend on `turbovault-plugin-api`; do not reach into server internals.
 - Publish only local tool names and let the host add the namespace.
 - Treat hook delivery and provenance as advisory.
-- Add provider-contract, namespace, lifecycle, lag/resync, and feature-off
-  tests.
+- Add provider-contract, namespace, lifecycle, and lag/resync tests.
+- Test both feature-off compatibility and feature-on behavior. Every plugin
+  must be exercised by the workspace `--all-features` CI suite, plus focused
+  tests in its own crate.
