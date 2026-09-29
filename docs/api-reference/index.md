@@ -77,9 +77,9 @@ authoritative catalog, including schemas and behavior annotations.
 `VaultLifecycleTools::validate_vault` is also available through the Rust library,
 but is not mounted as an MCP tool.
 
-## Library: timed reminders
+## Library: Tasks timing
 
-Obsidian Tasks lines can opt into timed reminders with `#remind` or a truthy Dataview `remind::` / `reminder::` field. The vault flag `timed_reminders` (default off) gates [`turbovault_core::remind_eligible_tasks`](timed-reminders.md). TurboVault does not deliver notifications. Full Calendar notes are not parsed. See [Timed vault reminders](timed-reminders.md).
+Due, scheduled, and start values can carry a clock time, and `status_marker` preserves the checkbox character (` `, `x`, `/`, `-`). See [Tasks timing fields](task-timing.md).
 
 ## Example Workflows
 

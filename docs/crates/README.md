@@ -48,7 +48,7 @@ This crate provides fast, production-ready parsing of Obsidian markdown files, e
 - **Wikilink Parser**: `[[Note]]`, `[[folder/Note#Heading]]`, `[[Note#^block]]` parsing
 - **Embed Parser**: `![[Image.png]]`, `![[OtherNote]]` extraction
 - **Tag Parser**: `#tag`, `#parent/child` parsing
-- **Task Parser**: `- [ ] Todo`, `- [x] Done` extraction, including Tasks emoji / Dataview timing and `#remind` opt-in
+- **Task Parser**: `- [ ] Todo`, `- [x] Done` extraction, including Tasks emoji / Dataview dates, optional clock times, and checkbox markers
 - **Callout Parser**: `> [!NOTE]`, `> [!WARNING]+` parsing
 - **Heading Parser**: `# H1` through `###### H6` with anchor generation
 

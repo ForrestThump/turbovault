@@ -269,7 +269,6 @@ mod tests {
             allowed_operations: None,
             write_backend: crate::WriteBackend::default(),
             git: None,
-            timed_reminders: false,
         }
     }
 

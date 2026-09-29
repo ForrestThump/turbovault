@@ -269,23 +269,13 @@ pub struct TaskItem {
     /// Local clock time for [`TaskItem::start_date`], when the source included one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_time: Option<NaiveTime>,
-    /// Timed-reminder opt-in from `#remind` or a truthy Dataview `remind` / `reminder` field.
-    ///
-    /// This flag is recorded even when [`crate::VaultConfig::timed_reminders`] is off.
-    /// Delivery eligibility also requires that vault toggle. See [`crate::reminders`].
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub remind: bool,
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 impl TaskItem {
     /// Build a [`TaskItem`] from parsed Obsidian Tasks metadata.
     ///
     /// The checkbox marker is inferred: `x` when `is_completed` is set, otherwise
-    /// unknown (treated as an open space marker by reminder lifecycle).
+    /// unknown (treated as a space marker).
     #[must_use]
     pub fn from_parsed_metadata(
         parsed: crate::task_parser::ParsedTaskMetadata,
@@ -333,7 +323,6 @@ impl TaskItem {
             due_time,
             scheduled_time,
             start_time,
-            remind: parsed.remind.unwrap_or(false),
         }
     }
 
@@ -448,8 +437,7 @@ impl TaskBuilder {
 /// - `YYYY-MM-DD HH:MM`
 /// - `YYYY-MM-DD HH:MM:SS`
 ///
-/// Date-only values return `time: None`. Consumers choose the local minute in
-/// that case. Unrecognized text returns `(None, None)`.
+/// Date-only values return `time: None`. Unrecognized text returns `(None, None)`.
 fn split_task_datetime(value: Option<&str>) -> (Option<NaiveDate>, Option<NaiveTime>) {
     let Some(value) = value.map(str::trim).filter(|text| !text.is_empty()) else {
         return (None, None);
@@ -1042,7 +1030,6 @@ mod tests {
                 tags: vec!["review".to_string()],
                 block_ref: Some("pr-123".to_string()),
                 metadata,
-                remind: None,
             },
             false,
             SourcePosition::start(),
@@ -1103,7 +1090,6 @@ mod tests {
         assert!(task.due_date.is_none());
         assert!(task.due_time.is_none());
         assert!(task.metadata.is_empty());
-        assert!(!task.remind);
         assert!(task.status_marker.is_none());
         assert_eq!(task.checkbox_marker(), ' ');
     }
@@ -1177,6 +1163,54 @@ mod tests {
             task.metadata.get("project").map(String::as_str),
             Some("[[Team Work]]")
         );
+    }
+
+    #[test]
+    fn test_task_item_splits_clock_time_and_keeps_marker() {
+        let mut builder = TaskBuilder {
+            content: "Review [due:: 2026-05-01T09:30:15] [scheduled:: 2026-04-30] [start:: 2026-04-29 06:00] [repeat:: every weekday]".into(),
+            is_completed: false,
+            position: SourcePosition::start(),
+            status_marker: '/',
+        };
+        let task = builder.build();
+        assert_eq!(task.checkbox_marker(), '/');
+        assert!(!task.is_completed);
+        assert_eq!(
+            task.due_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-05-01")
+        );
+        assert_eq!(
+            task.due_time.map(|time| time.to_string()).as_deref(),
+            Some("09:30:15")
+        );
+        assert!(task.scheduled_time.is_none());
+        assert_eq!(
+            task.start_time.map(|time| time.to_string()).as_deref(),
+            Some("06:00:00")
+        );
+        assert_eq!(task.recurrence.as_deref(), Some("every weekday"));
+
+        let mut done = TaskBuilder {
+            content: "Shipped 📅 2026-05-04".into(),
+            is_completed: true,
+            position: SourcePosition::start(),
+            status_marker: 'x',
+        };
+        let done = done.build();
+        assert_eq!(done.checkbox_marker(), 'x');
+        assert!(done.is_completed);
+        assert!(done.due_time.is_none());
+
+        let mut cancelled = TaskBuilder {
+            content: "Dropped 📅 2026-05-05".into(),
+            is_completed: false,
+            position: SourcePosition::start(),
+            status_marker: '-',
+        };
+        let cancelled = cancelled.build();
+        assert_eq!(cancelled.checkbox_marker(), '-');
+        assert!(!cancelled.is_completed);
     }
 
     #[test]

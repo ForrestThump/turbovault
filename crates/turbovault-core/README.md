@@ -232,25 +232,11 @@ if !report.passed {
 - `Error` - Should be fixed (fails validation)
 - `Critical` - Must be fixed (fails validation)
 
-### Timed reminders (`reminders.rs`)
+### Tasks timing
 
-Opt-in metadata for consumers that schedule Obsidian Tasks. Vault config `timed_reminders` defaults to off. A task also needs `#remind` or a truthy Dataview `remind::` / `reminder::` value, an open checkbox, and a due, scheduled, or start date. Optional clock times are preserved; date-only values leave the minute to the consumer. Recurrence text is not expanded. TurboVault does not send notifications. Full Calendar event notes are not parsed.
+Due, scheduled, and start values may include a clock time. `TaskItem` stores the date on the existing fields and the clock time on `due_time`, `scheduled_time`, and `start_time`. Date-only values leave the time fields empty. `status_marker` is the checkbox character (` `, `x`, `/`, `-`); `checkbox_marker()` fills it in for older tasks that only stored `is_completed`. Recurrence stays the original rule text.
 
-```rust
-use turbovault_core::{SourcePosition, TaskBuilder, remind_eligible_tasks};
-
-let mut builder = TaskBuilder {
-    content: "Stretch 📅 2026-05-01 07:30 #remind".into(),
-    is_completed: false,
-    position: SourcePosition::start(),
-    status_marker: ' ',
-};
-let task = builder.build();
-let due = remind_eligible_tasks([&task], true);
-assert_eq!(due.len(), 1);
-```
-
-See `docs/api-reference/timed-reminders.md`.
+See `docs/api-reference/task-timing.md`.
 
 ### Configuration Profiles (`profiles.rs`)
 

@@ -42,11 +42,6 @@ vaults:
     path: /Users/yourname/Documents/ObsidianVault
     is_default: true
 
-    # Opt-in timed reminder metadata for consumers. Default false.
-    # Parsing still records `#remind` / `remind:: true` when this is false.
-    # TurboVault does not send notifications. See docs/api-reference/timed-reminders.md.
-    timed_reminders: false
-
     # Recommended for Git-managed vaults: every batch becomes one atomic
     # commit with cross-process compare-and-swap conflict detection.
     # Run `git init` in the vault before enabling this backend.

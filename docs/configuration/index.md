@@ -84,18 +84,6 @@ tool_visibility:
 
 The same rules can be supplied with comma-separated CLI/env overrides: `--allowed-tools` / `TURBOVAULT_ALLOWED_TOOLS`, `--hidden-tools` / `TURBOVAULT_HIDDEN_TOOLS`, `--disabled-tools` / `TURBOVAULT_DISABLED_TOOLS`, and `--require-read-only-tools` / `TURBOVAULT_REQUIRE_READ_ONLY_TOOLS`.
 
-### Timed reminders
-
-Each vault entry accepts `timed_reminders` (default `false`). When `true`, a consumer may call `turbovault_core::remind_eligible_tasks` and use the result as the source of truth for Tasks fire times. TurboVault still does not send notifications. Tasks also need `#remind` or a truthy `remind::` / `reminder::` field. See [Timed vault reminders](../api-reference/timed-reminders.md).
-
-```yaml
-vaults:
-  - name: personal
-    path: /path/to/vault
-    is_default: true
-    timed_reminders: true
-```
-
 ## CLI Reference
 
 ### Command Line Arguments

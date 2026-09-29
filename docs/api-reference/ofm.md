@@ -69,7 +69,7 @@ Recognized structured types: note, tip, info, todo, important, success, question
 - [-] Cancelled
 ```
 
-Trailing Obsidian Tasks emoji metadata and Dataview inline fields are parsed onto `TaskItem` (due, scheduled, start, recurrence, and the rest). A line opts into timed reminders with `#remind` or `[remind:: true]`. That metadata is inert unless the vault sets `timed_reminders: true`. See [Timed vault reminders](timed-reminders.md). Full Calendar event notes are not parsed here.
+Trailing Obsidian Tasks emoji metadata and Dataview inline fields are parsed onto `TaskItem` (due, scheduled, start, recurrence, and the rest). A clock time on those dates is kept in `due_time`, `scheduled_time`, or `start_time`. The checkbox character is `status_marker`. See [Tasks timing fields](task-timing.md).
 
 ### Frontmatter
 

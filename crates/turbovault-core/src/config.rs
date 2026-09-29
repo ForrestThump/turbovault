@@ -134,15 +134,6 @@ pub struct VaultConfig {
     /// Git substrate settings. Only used when `write_backend == Git`.
     #[serde(default)]
     pub git: Option<VaultGitConfig>,
-
-    /// Vault-level gate for timed reminder queries.
-    ///
-    /// Default `false`. Task parsing still records each task's `#remind` /
-    /// `remind::` opt-in either way. When this is `true`, consumers may call
-    /// [`crate::remind_eligible_tasks`] and treat the result as the source of
-    /// fire-time metadata. TurboVault does not deliver notifications.
-    #[serde(default)]
-    pub timed_reminders: bool,
 }
 
 impl VaultConfig {
@@ -193,7 +184,6 @@ pub struct VaultConfigBuilder {
     allowed_operations: Option<HashSet<String>>,
     write_backend: WriteBackend,
     git: Option<VaultGitConfig>,
-    timed_reminders: bool,
 }
 
 impl VaultConfigBuilder {
@@ -213,7 +203,6 @@ impl VaultConfigBuilder {
             allowed_operations: None,
             write_backend: WriteBackend::default(),
             git: None,
-            timed_reminders: false,
         }
     }
 
@@ -242,15 +231,6 @@ impl VaultConfigBuilder {
         self
     }
 
-    /// Enable timed-reminder queries for this vault.
-    ///
-    /// Off by default. This does not send notifications; it only lets
-    /// consumers call [`crate::remind_eligible_tasks`].
-    pub fn timed_reminders(mut self, enabled: bool) -> Self {
-        self.timed_reminders = enabled;
-        self
-    }
-
     /// Build and validate
     pub fn build(self) -> Result<VaultConfig> {
         // Expand tilde and environment variables in the path
@@ -272,7 +252,6 @@ impl VaultConfigBuilder {
             allowed_operations: self.allowed_operations,
             write_backend: self.write_backend,
             git: self.git,
-            timed_reminders: self.timed_reminders,
         };
         config.validate()?;
         Ok(config)
@@ -471,7 +450,6 @@ mod tests {
         let v = VaultConfig::builder("main", temp.path()).build().unwrap();
         assert_eq!(v.write_backend, WriteBackend::Legacy);
         assert!(v.git.is_none());
-        assert!(!v.timed_reminders);
     }
 
     #[test]
@@ -534,26 +512,6 @@ mod tests {
         assert!(yaml.contains("git"), "got: {yaml}");
         let back: WriteBackend = yaml_serde::from_str("legacy\n").unwrap();
         assert_eq!(back, WriteBackend::Legacy);
-    }
-
-    #[test]
-    fn timed_reminders_defaults_off_and_roundtrips() {
-        let temp = TempDir::new().unwrap();
-        let off = VaultConfig::builder("main", temp.path()).build().unwrap();
-        assert!(!off.timed_reminders);
-        let yaml = yaml_serde::to_string(&off).unwrap();
-        let back: VaultConfig = yaml_serde::from_str(&yaml).unwrap();
-        assert!(!back.timed_reminders);
-
-        let on = VaultConfig::builder("main", temp.path())
-            .timed_reminders(true)
-            .build()
-            .unwrap();
-        assert!(on.timed_reminders);
-        let yaml = yaml_serde::to_string(&on).unwrap();
-        assert!(yaml.contains("timed_reminders"), "got: {yaml}");
-        let back: VaultConfig = yaml_serde::from_str(&yaml).unwrap();
-        assert!(back.timed_reminders);
     }
 
     #[test]
