@@ -69,6 +69,8 @@ Recognized structured types: note, tip, info, todo, important, success, question
 - [-] Cancelled
 ```
 
+Trailing Obsidian Tasks emoji metadata and Dataview inline fields are parsed onto `TaskItem` (due, scheduled, start, recurrence, and the rest). A clock time on those dates is kept in `due_time`, `scheduled_time`, or `start_time`. The checkbox character is `status_marker`. See [Tasks timing fields](task-timing.md).
+
 ### Frontmatter
 
 ```yaml

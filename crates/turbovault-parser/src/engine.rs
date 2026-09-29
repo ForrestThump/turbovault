@@ -384,15 +384,15 @@ impl<'a> ParseEngine<'a> {
                 Event::TaskListMarker(_checked) if options.parse_tasks => {
                     in_task_item = true;
                     // Read raw marker byte to detect extended states [/] [-]
-                    task_builder.is_completed = {
-                        let raw_marker = self
-                            .content
-                            .as_bytes()
-                            .get(range.start + 1)
-                            .copied()
-                            .unwrap_or(b' ') as char;
-                        crate::models::TaskStatus::from_marker(raw_marker).is_completed()
-                    };
+                    let raw_marker = self
+                        .content
+                        .as_bytes()
+                        .get(range.start + 1)
+                        .copied()
+                        .unwrap_or(b' ') as char;
+                    task_builder.status_marker = raw_marker;
+                    task_builder.is_completed =
+                        crate::models::TaskStatus::from_marker(raw_marker).is_completed();
                     task_builder.position = SourcePosition::from_offset_indexed(
                         &self.index,
                         task_line_start_for_marker(self.content, &self.index, range.start),
@@ -727,6 +727,7 @@ impl<'a> ParseEngine<'a> {
             let mut task_builder = TaskBuilder {
                 content: content.to_string(),
                 is_completed: crate::models::TaskStatus::from_marker(marker).is_completed(),
+                status_marker: marker,
                 position: SourcePosition::from_offset_indexed(
                     &self.index,
                     task_start,

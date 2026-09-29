@@ -5,6 +5,11 @@
 //! the task, matching the Tasks plugin behavior described in its task-format
 //! docs.
 //!
+//! Due, scheduled, and start values may include a clock time (`YYYY-MM-DDTHH:MM`,
+//! `YYYY-MM-DD HH:MM`, or an emoji date followed by `HH:MM` / `HH:MM:SS`). The
+//! raw text is preserved here; [`crate::TaskItem`] splits it into a date and an
+//! optional clock time.
+//!
 //! This module intentionally exposes two entry points:
 //!
 //! - [`parse_task_content`] parses the text after the checkbox marker. This is
@@ -258,11 +263,69 @@ fn parse_emoji_date_field(input: &mut &str) -> ModalResult<ParsedTaskMetadata> {
     ))
     .parse_next(input)?;
     let _ = space0.parse_next(input)?;
-    let value: &str = take_while(1.., |c: char| !c.is_whitespace()).parse_next(input)?;
+    let date_token: &str = take_while(1.., |c: char| !c.is_whitespace()).parse_next(input)?;
+    let mut value = date_token.to_string();
+    // Obsidian Tasks dates are `YYYY-MM-DD`. A following `HH:MM` or `HH:MM:SS`
+    // token is a local clock time so consumers can fire at that minute.
+    // `YYYY-MM-DDTHH:MM` stays a single token and is left untouched.
+    if !date_token.contains(':')
+        && !date_token.contains('T')
+        && !date_token.contains('t')
+        && let Some(clock) = try_consume_clock_time(input)
+    {
+        value.push('T');
+        value.push_str(&clock);
+    }
 
     let mut meta = ParsedTaskMetadata::default();
     set_standard_field(&mut meta, key, value.trim());
     Ok(meta)
+}
+
+/// If the next token is `HH:MM` or `HH:MM:SS`, consume it and return the token.
+fn try_consume_clock_time(input: &mut &str) -> Option<String> {
+    let rest = input.trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+    let token_len = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let token = &rest[..token_len];
+    if !is_clock_token(token) {
+        return None;
+    }
+    let leading = input.len() - rest.len();
+    *input = &input[leading + token_len..];
+    Some(token.to_string())
+}
+
+fn is_clock_token(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    let parsed = match bytes.len() {
+        5 if bytes[2] == b':' => (
+            parse_two_digits(&bytes[0..2]),
+            parse_two_digits(&bytes[3..5]),
+            Some(0),
+        ),
+        8 if bytes[2] == b':' && bytes[5] == b':' => (
+            parse_two_digits(&bytes[0..2]),
+            parse_two_digits(&bytes[3..5]),
+            parse_two_digits(&bytes[6..8]),
+        ),
+        _ => return false,
+    };
+    matches!(
+        parsed,
+        (Some(hour), Some(minute), Some(second))
+            if hour <= 23 && minute <= 59 && second <= 59
+    )
+}
+
+fn parse_two_digits(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() != 2 || !bytes.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    text.parse().ok()
 }
 
 fn parse_recurrence_field(input: &mut &str) -> ModalResult<ParsedTaskMetadata> {
@@ -725,5 +788,51 @@ mod tests {
         let task = parse_task_line("- [ ] Decide recurrence 🔁").unwrap();
         assert_eq!(task.description, "Decide recurrence 🔁");
         assert!(task.recurrence.is_none());
+    }
+
+    #[test]
+    fn emoji_date_keeps_following_clock_time() {
+        let task = parse_task_line("- [ ] Standup 📅 2026-05-01 09:30").unwrap();
+        assert_eq!(task.description, "Standup");
+        assert_eq!(task.due.as_deref(), Some("2026-05-01T09:30"));
+    }
+
+    #[test]
+    fn emoji_clock_time_with_seconds() {
+        let task = parse_task_line("- [ ] Standup 🛫 2026-04-29 06:00:15").unwrap();
+        assert_eq!(task.start.as_deref(), Some("2026-04-29T06:00:15"));
+    }
+
+    #[test]
+    fn emoji_iso_datetime_stays_one_token() {
+        let task = parse_task_line("- [ ] Standup ⏳ 2026-05-01T14:05:30").unwrap();
+        assert_eq!(task.scheduled.as_deref(), Some("2026-05-01T14:05:30"));
+    }
+
+    #[test]
+    fn date_only_emoji_value_has_no_clock_suffix() {
+        let task = parse_task_line("- [ ] Buy milk 📅 2026-05-01 🔁 every day").unwrap();
+        assert_eq!(task.due.as_deref(), Some("2026-05-01"));
+        assert_eq!(task.recurrence.as_deref(), Some("every day"));
+    }
+
+    #[test]
+    fn dataview_datetime_and_recurrence_stay_intact() {
+        let task = parse_task_line(
+            "- [ ] Review [due:: 2026-05-01 09:30] [scheduled:: 2026-04-30T08:00] [start:: 2026-04-29] [repeat:: every weekday]",
+        )
+        .unwrap();
+        assert_eq!(task.description, "Review");
+        assert_eq!(task.due.as_deref(), Some("2026-05-01 09:30"));
+        assert_eq!(task.scheduled.as_deref(), Some("2026-04-30T08:00"));
+        assert_eq!(task.start.as_deref(), Some("2026-04-29"));
+        assert_eq!(task.recurrence.as_deref(), Some("every weekday"));
+    }
+
+    #[test]
+    fn invalid_clock_token_is_not_swallowed() {
+        let task = parse_task_line("- [ ] Standup 📅 2026-05-01 99:99").unwrap();
+        assert_eq!(task.description, "Standup 📅 2026-05-01 99:99");
+        assert!(task.due.is_none());
     }
 }

@@ -232,6 +232,12 @@ if !report.passed {
 - `Error` - Should be fixed (fails validation)
 - `Critical` - Must be fixed (fails validation)
 
+### Tasks timing
+
+Due, scheduled, and start values may include a clock time. `TaskItem` stores the date on the existing fields and the clock time on `due_time`, `scheduled_time`, and `start_time`. Date-only values leave the time fields empty. `status_marker` is the checkbox character (` `, `x`, `/`, `-`); `checkbox_marker()` fills it in for older tasks that only stored `is_completed`. Recurrence stays the original rule text.
+
+See `docs/api-reference/task-timing.md`.
+
 ### Configuration Profiles (`profiles.rs`)
 
 Pre-configured deployments for common use cases:

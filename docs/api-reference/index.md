@@ -77,6 +77,10 @@ authoritative catalog, including schemas and behavior annotations.
 `VaultLifecycleTools::validate_vault` is also available through the Rust library,
 but is not mounted as an MCP tool.
 
+## Library: Tasks timing
+
+Due, scheduled, and start values can carry a clock time, and `status_marker` preserves the checkbox character (` `, `x`, `/`, `-`). See [Tasks timing fields](task-timing.md).
+
 ## Example Workflows
 
 ### Search and Summarize

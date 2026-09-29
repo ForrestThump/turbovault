@@ -8,7 +8,7 @@
 //!
 //! The types roughly correspond to Python dataclasses in the reference implementation.
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -254,26 +254,60 @@ pub struct TaskItem {
     /// fields remain available here.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, String>,
+    /// Checkbox character (` `, `x`, `/`, `-`, …).
+    ///
+    /// Missing on tasks deserialized from older JSON. [`TaskItem::checkbox_marker`]
+    /// then infers `x` from [`TaskItem::is_completed`] and space otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_marker: Option<char>,
+    /// Local clock time for [`TaskItem::due_date`], when the source included one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_time: Option<NaiveTime>,
+    /// Local clock time for [`TaskItem::scheduled_date`], when the source included one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_time: Option<NaiveTime>,
+    /// Local clock time for [`TaskItem::start_date`], when the source included one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<NaiveTime>,
 }
 
 impl TaskItem {
     /// Build a [`TaskItem`] from parsed Obsidian Tasks metadata.
+    ///
+    /// The checkbox marker is inferred: `x` when `is_completed` is set, otherwise
+    /// unknown (treated as a space marker).
     #[must_use]
     pub fn from_parsed_metadata(
         parsed: crate::task_parser::ParsedTaskMetadata,
         is_completed: bool,
         position: SourcePosition,
     ) -> Self {
+        Self::from_parsed_metadata_with_marker(parsed, is_completed, None, position)
+    }
+
+    /// Build a [`TaskItem`], preserving the raw checkbox marker.
+    ///
+    /// `status_marker` is the character inside `[ ]`, such as ` `, `x`, `/`, or `-`.
+    #[must_use]
+    pub fn from_parsed_metadata_with_marker(
+        parsed: crate::task_parser::ParsedTaskMetadata,
+        is_completed: bool,
+        status_marker: Option<char>,
+        position: SourcePosition,
+    ) -> Self {
+        let (scheduled_date, scheduled_time) = split_task_datetime(parsed.scheduled.as_deref());
+        let (start_date, start_time) = split_task_datetime(parsed.start.as_deref());
+        let (due_date, due_time) = split_task_datetime(parsed.due.as_deref());
         Self {
             content: parsed.description,
             is_completed,
             position,
-            created_date: parse_date_opt(parsed.created.as_deref()),
-            scheduled_date: parse_date_opt(parsed.scheduled.as_deref()),
-            start_date: parse_date_opt(parsed.start.as_deref()),
-            due_date: parse_date_opt(parsed.due.as_deref()),
-            done_date: parse_date_opt(parsed.done.as_deref()),
-            cancelled_date: parse_date_opt(parsed.cancelled.as_deref()),
+            created_date: split_task_datetime(parsed.created.as_deref()).0,
+            scheduled_date,
+            start_date,
+            due_date,
+            done_date: split_task_datetime(parsed.done.as_deref()).0,
+            cancelled_date: split_task_datetime(parsed.cancelled.as_deref()).0,
             priority: parsed
                 .priority
                 .and_then(TaskPriority::from_char)
@@ -285,6 +319,26 @@ impl TaskItem {
             tags: parsed.tags,
             block_ref: parsed.block_ref,
             metadata: parsed.metadata,
+            status_marker,
+            due_time,
+            scheduled_time,
+            start_time,
+        }
+    }
+
+    /// Checkbox character, inferring from [`TaskItem::is_completed`] when the
+    /// marker was not stored.
+    #[must_use]
+    pub fn checkbox_marker(&self) -> char {
+        match self.status_marker {
+            Some(marker) if marker != '\0' => marker,
+            _ => {
+                if self.is_completed {
+                    'x'
+                } else {
+                    ' '
+                }
+            }
         }
     }
 }
@@ -353,14 +407,20 @@ pub struct TaskBuilder {
     pub content: String,
     pub is_completed: bool,
     pub position: SourcePosition,
+    /// Checkbox character. `\0` (the [`Default`]) means the marker is unknown
+    /// and will be inferred from [`TaskBuilder::is_completed`].
+    pub status_marker: char,
 }
 
 impl TaskBuilder {
     pub fn build(&mut self) -> TaskItem {
         let parsed: ParsedTaskMetadata = crate::task_parser::parse_task_content(&self.content);
-        let task_item = TaskItem::from_parsed_metadata(
+        let status_marker = std::mem::take(&mut self.status_marker);
+        let marker = (status_marker != '\0').then_some(status_marker);
+        let task_item = TaskItem::from_parsed_metadata_with_marker(
             parsed,
             std::mem::take(&mut self.is_completed),
+            marker,
             std::mem::take(&mut self.position),
         );
         self.content.clear();
@@ -368,8 +428,35 @@ impl TaskBuilder {
     }
 }
 
-fn parse_date_opt(value: Option<&str>) -> Option<NaiveDate> {
-    NaiveDate::parse_from_str(value?, "%Y-%m-%d").ok()
+/// Split a Tasks or Dataview date value into a calendar date and optional clock time.
+///
+/// Accepted forms:
+/// - `YYYY-MM-DD`
+/// - `YYYY-MM-DDTHH:MM`
+/// - `YYYY-MM-DDTHH:MM:SS`
+/// - `YYYY-MM-DD HH:MM`
+/// - `YYYY-MM-DD HH:MM:SS`
+///
+/// Date-only values return `time: None`. Unrecognized text returns `(None, None)`.
+fn split_task_datetime(value: Option<&str>) -> (Option<NaiveDate>, Option<NaiveTime>) {
+    let Some(value) = value.map(str::trim).filter(|text| !text.is_empty()) else {
+        return (None, None);
+    };
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        return (Some(date), None);
+    }
+    const FORMATS: &[&str] = &[
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+    ];
+    for format in FORMATS {
+        if let Ok(date_time) = NaiveDateTime::parse_from_str(value, format) {
+            return (Some(date_time.date()), Some(date_time.time()));
+        }
+    }
+    (None, None)
 }
 
 /// Type of callout block
@@ -1001,7 +1088,10 @@ mod tests {
         assert!(!task.is_completed);
         assert_eq!(task.priority, TaskPriority::Normal);
         assert!(task.due_date.is_none());
+        assert!(task.due_time.is_none());
         assert!(task.metadata.is_empty());
+        assert!(task.status_marker.is_none());
+        assert_eq!(task.checkbox_marker(), ' ');
     }
 
     #[test]
@@ -1073,6 +1163,54 @@ mod tests {
             task.metadata.get("project").map(String::as_str),
             Some("[[Team Work]]")
         );
+    }
+
+    #[test]
+    fn test_task_item_splits_clock_time_and_keeps_marker() {
+        let mut builder = TaskBuilder {
+            content: "Review [due:: 2026-05-01T09:30:15] [scheduled:: 2026-04-30] [start:: 2026-04-29 06:00] [repeat:: every weekday]".into(),
+            is_completed: false,
+            position: SourcePosition::start(),
+            status_marker: '/',
+        };
+        let task = builder.build();
+        assert_eq!(task.checkbox_marker(), '/');
+        assert!(!task.is_completed);
+        assert_eq!(
+            task.due_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-05-01")
+        );
+        assert_eq!(
+            task.due_time.map(|time| time.to_string()).as_deref(),
+            Some("09:30:15")
+        );
+        assert!(task.scheduled_time.is_none());
+        assert_eq!(
+            task.start_time.map(|time| time.to_string()).as_deref(),
+            Some("06:00:00")
+        );
+        assert_eq!(task.recurrence.as_deref(), Some("every weekday"));
+
+        let mut done = TaskBuilder {
+            content: "Shipped 📅 2026-05-04".into(),
+            is_completed: true,
+            position: SourcePosition::start(),
+            status_marker: 'x',
+        };
+        let done = done.build();
+        assert_eq!(done.checkbox_marker(), 'x');
+        assert!(done.is_completed);
+        assert!(done.due_time.is_none());
+
+        let mut cancelled = TaskBuilder {
+            content: "Dropped 📅 2026-05-05".into(),
+            is_completed: false,
+            position: SourcePosition::start(),
+            status_marker: '-',
+        };
+        let cancelled = cancelled.build();
+        assert_eq!(cancelled.checkbox_marker(), '-');
+        assert!(!cancelled.is_completed);
     }
 
     #[test]

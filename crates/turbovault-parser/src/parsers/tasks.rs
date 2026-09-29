@@ -165,4 +165,79 @@ mod tests {
         assert_eq!(tasks[0].position.column, 1);
         assert_eq!(tasks[0].position.offset, 7);
     }
+
+    #[test]
+    fn test_task_clock_times_and_status_markers() {
+        let content = "\
+- [ ] Open dated 📅 2026-05-01
+- [ ] Dataview [due:: 2026-05-02T09:30] 🔁 every week
+- [x] Done 📅 2026-05-04
+- [-] Cancelled 📅 2026-05-05 08:15
+- [/] In progress ⏳ 2026-05-06T11:00
+- [ ] Start only 🛫 2026-04-29 06:00
+";
+        let tasks = parse_tasks(content);
+        assert_eq!(tasks.len(), 6);
+        let task = |prefix: &str| {
+            tasks
+                .iter()
+                .find(|task| task.content.starts_with(prefix))
+                .unwrap_or_else(|| panic!("missing task {prefix}"))
+        };
+
+        let open = task("Open dated");
+        assert_eq!(open.checkbox_marker(), ' ');
+        assert!(!open.is_completed);
+        assert_eq!(
+            open.due_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-05-01")
+        );
+        assert!(open.due_time.is_none());
+
+        let dataview = task("Dataview");
+        assert_eq!(
+            dataview.due_time.map(|time| time.to_string()).as_deref(),
+            Some("09:30:00")
+        );
+        assert_eq!(dataview.recurrence.as_deref(), Some("every week"));
+
+        let done = task("Done");
+        assert_eq!(done.checkbox_marker(), 'x');
+        assert!(done.is_completed);
+
+        let cancelled = task("Cancelled");
+        assert_eq!(cancelled.checkbox_marker(), '-');
+        assert!(!cancelled.is_completed);
+        assert_eq!(
+            cancelled.due_time.map(|time| time.to_string()).as_deref(),
+            Some("08:15:00")
+        );
+
+        let in_progress = task("In progress");
+        assert_eq!(in_progress.checkbox_marker(), '/');
+        assert!(!in_progress.is_completed);
+        assert_eq!(
+            in_progress
+                .scheduled_time
+                .map(|time| time.to_string())
+                .as_deref(),
+            Some("11:00:00")
+        );
+
+        let start_only = task("Start only");
+        assert_eq!(
+            start_only
+                .start_date
+                .map(|date| date.to_string())
+                .as_deref(),
+            Some("2026-04-29")
+        );
+        assert_eq!(
+            start_only
+                .start_time
+                .map(|time| time.to_string())
+                .as_deref(),
+            Some("06:00:00")
+        );
+    }
 }

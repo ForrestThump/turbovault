@@ -18,6 +18,7 @@ Welcome to the TurboVault documentation. This comprehensive guide will help you 
 - [API Reference](api-reference/index.md) - Complete reference for all MCP tools
 - [Tool Categories](api-reference/tools.md) - Organized tool reference
 - [Obsidian Flavored Markdown](api-reference/ofm.md) - OFM syntax guide
+- [Tasks timing fields](api-reference/task-timing.md) - Clock times and checkbox markers on Tasks lines
 
 ### Deployment
 - [Deployment Guide](deployment/index.md) - Deploy to production

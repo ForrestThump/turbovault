@@ -5,6 +5,12 @@ All notable changes to TurboVault will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Tasks timing fidelity**: due, scheduled, and start values that include a clock time (`YYYY-MM-DDTHH:MM[:SS]`, `YYYY-MM-DD HH:MM[:SS]`, or an emoji date followed by `HH:MM` / `HH:MM:SS`) keep both the date and the time (`due_time`, `scheduled_time`, `start_time`). `status_marker` preserves the checkbox character (` `, `x`, `/`, `-`). Recurrence text is unchanged. See `docs/api-reference/task-timing.md`.
+
 ## [1.5.0] - 2026-05-01
 
 ### Added
