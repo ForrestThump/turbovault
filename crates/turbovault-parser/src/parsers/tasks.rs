@@ -167,20 +167,17 @@ mod tests {
     }
 
     #[test]
-    fn test_remind_opt_in_gate_and_timing_through_engine() {
-        use turbovault_core::{ReminderAnchor, ReminderLifecycle, remind_eligible_tasks};
-
+    fn test_task_clock_times_and_status_markers() {
         let content = "\
-- [ ] Open dated #remind 📅 2026-05-01
-- [ ] Dataview [remind:: true] [due:: 2026-05-02T09:30] 🔁 every week
-- [ ] Unmarked 📅 2026-05-03
-- [x] Done #remind 📅 2026-05-04
-- [-] Cancelled #remind 📅 2026-05-05
-- [/] In progress #remind ⏳ 2026-05-06
-- [ ] No date #remind 🔁 every day
+- [ ] Open dated 📅 2026-05-01
+- [ ] Dataview [due:: 2026-05-02T09:30] 🔁 every week
+- [x] Done 📅 2026-05-04
+- [-] Cancelled 📅 2026-05-05 08:15
+- [/] In progress ⏳ 2026-05-06T11:00
+- [ ] Start only 🛫 2026-04-29 06:00
 ";
         let tasks = parse_tasks(content);
-        assert_eq!(tasks.len(), 7);
+        assert_eq!(tasks.len(), 6);
         let task = |prefix: &str| {
             tasks
                 .iter()
@@ -189,53 +186,58 @@ mod tests {
         };
 
         let open = task("Open dated");
-        assert!(open.is_remind_eligible());
-        assert!(open.due_time.is_none());
         assert_eq!(open.checkbox_marker(), ' ');
+        assert!(!open.is_completed);
+        assert_eq!(
+            open.due_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-05-01")
+        );
+        assert!(open.due_time.is_none());
 
         let dataview = task("Dataview");
-        assert!(dataview.is_remind_eligible());
         assert_eq!(
             dataview.due_time.map(|time| time.to_string()).as_deref(),
             Some("09:30:00")
         );
         assert_eq!(dataview.recurrence.as_deref(), Some("every week"));
-        assert_eq!(
-            dataview.reminder_info().fire().unwrap().anchor,
-            ReminderAnchor::Due
-        );
-
-        let unmarked = task("Unmarked");
-        assert!(!unmarked.remind);
-        assert!(!unmarked.is_remind_eligible());
 
         let done = task("Done");
-        assert!(done.remind);
-        assert_eq!(done.reminder_lifecycle(), ReminderLifecycle::Done);
-        assert!(!done.is_remind_eligible());
+        assert_eq!(done.checkbox_marker(), 'x');
+        assert!(done.is_completed);
 
         let cancelled = task("Cancelled");
         assert_eq!(cancelled.checkbox_marker(), '-');
-        assert_eq!(cancelled.reminder_lifecycle(), ReminderLifecycle::Cancelled);
-        assert!(!cancelled.is_remind_eligible());
-
-        let in_progress = task("In progress");
-        assert_eq!(in_progress.reminder_lifecycle(), ReminderLifecycle::Open);
-        assert!(in_progress.is_remind_eligible());
+        assert!(!cancelled.is_completed);
         assert_eq!(
-            in_progress.reminder_info().fire().unwrap().anchor,
-            ReminderAnchor::Scheduled
+            cancelled.due_time.map(|time| time.to_string()).as_deref(),
+            Some("08:15:00")
         );
 
-        let no_date = task("No date");
-        assert!(no_date.remind);
-        assert!(no_date.due_date.is_none());
-        assert!(!no_date.is_remind_eligible());
+        let in_progress = task("In progress");
+        assert_eq!(in_progress.checkbox_marker(), '/');
+        assert!(!in_progress.is_completed);
+        assert_eq!(
+            in_progress
+                .scheduled_time
+                .map(|time| time.to_string())
+                .as_deref(),
+            Some("11:00:00")
+        );
 
-        assert!(remind_eligible_tasks(&tasks, false).is_empty());
-        let eligible = remind_eligible_tasks(&tasks, true);
-        let mut labels: Vec<_> = eligible.iter().map(|task| task.content.as_str()).collect();
-        labels.sort_unstable();
-        assert_eq!(labels, vec!["Dataview", "In progress", "Open dated"]);
+        let start_only = task("Start only");
+        assert_eq!(
+            start_only
+                .start_date
+                .map(|date| date.to_string())
+                .as_deref(),
+            Some("2026-04-29")
+        );
+        assert_eq!(
+            start_only
+                .start_time
+                .map(|time| time.to_string())
+                .as_deref(),
+            Some("06:00:00")
+        );
     }
 }
