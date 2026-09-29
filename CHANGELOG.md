@@ -5,6 +5,12 @@ All notable changes to TurboVault will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Timed reminder metadata for Obsidian Tasks**: `TaskItem` records a remind opt-in (`#remind`, or Dataview `remind::` / `reminder::` with truthy `true` / `yes` / `y` / `1` / `on`), optional clock times on due / scheduled / start, and the checkbox marker so consumers can tell open from done or cancelled. `VaultConfig.timed_reminders` (default `false`) gates `remind_eligible_tasks`. TurboVault does not deliver notifications. Full Calendar notes stay out of scope. See `docs/api-reference/timed-reminders.md`.
+
 ## [1.5.0] - 2026-05-01
 
 ### Added

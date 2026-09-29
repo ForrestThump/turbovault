@@ -5,6 +5,14 @@
 //! the task, matching the Tasks plugin behavior described in its task-format
 //! docs.
 //!
+//! Timed-reminder opt-in is parsed here and projected onto [`Task`] /
+//! [`crate::TaskItem`]. It is not a delivery channel: a task opts in with the
+//! inline tag `#remind` (any ASCII case) or a Dataview field `remind::` /
+//! `reminder::` whose value is truthy. Accepted truthy values, after trimming
+//! and optional matching quotes, are `true`, `yes`, `y`, `1`, and `on`
+//! (ASCII case-insensitive). Any other value is an explicit opt-out.
+//! Rightmost metadata wins, same as the other task fields.
+//!
 //! This module intentionally exposes two entry points:
 //!
 //! - [`parse_task_content`] parses the text after the checkbox marker. This is
@@ -61,6 +69,13 @@ pub struct ParsedTaskMetadata {
     pub tags: Vec<String>,
     pub block_ref: Option<String>,
     pub metadata: HashMap<String, String>,
+    /// Timed-reminder opt-in while metadata is still being merged.
+    ///
+    /// `None` means this fragment did not mention remind. `Some(true)` is
+    /// `#remind` or a truthy `remind::` / `reminder::` value. `Some(false)` is
+    /// an explicit non-truthy remind field. Later fragments overwrite earlier
+    /// ones.
+    pub remind: Option<bool>,
 }
 
 /// A parsed Obsidian task line.
@@ -85,6 +100,8 @@ pub struct Task {
     pub block_ref: Option<String>,
     /// Dataview inline fields, including custom fields.
     pub metadata: HashMap<String, String>,
+    /// Timed-reminder opt-in (`#remind` or a truthy `remind::` / `reminder::`).
+    pub remind: bool,
 }
 
 /// Parse a complete Obsidian task line, including the checkbox marker.
@@ -119,6 +136,7 @@ pub fn parse_task_line(input: &str) -> Result<Task, String> {
         tags: parsed.tags,
         block_ref: parsed.block_ref,
         metadata: parsed.metadata,
+        remind: parsed.remind.unwrap_or(false),
     })
 }
 
@@ -258,11 +276,69 @@ fn parse_emoji_date_field(input: &mut &str) -> ModalResult<ParsedTaskMetadata> {
     ))
     .parse_next(input)?;
     let _ = space0.parse_next(input)?;
-    let value: &str = take_while(1.., |c: char| !c.is_whitespace()).parse_next(input)?;
+    let date_token: &str = take_while(1.., |c: char| !c.is_whitespace()).parse_next(input)?;
+    let mut value = date_token.to_string();
+    // Obsidian Tasks dates are `YYYY-MM-DD`. A following `HH:MM` or `HH:MM:SS`
+    // token is a local clock time so consumers can fire at that minute.
+    // `YYYY-MM-DDTHH:MM` stays a single token and is left untouched.
+    if !date_token.contains(':')
+        && !date_token.contains('T')
+        && !date_token.contains('t')
+        && let Some(clock) = try_consume_clock_time(input)
+    {
+        value.push('T');
+        value.push_str(&clock);
+    }
 
     let mut meta = ParsedTaskMetadata::default();
     set_standard_field(&mut meta, key, value.trim());
     Ok(meta)
+}
+
+/// If the next token is `HH:MM` or `HH:MM:SS`, consume it and return the token.
+fn try_consume_clock_time(input: &mut &str) -> Option<String> {
+    let rest = input.trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+    let token_len = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let token = &rest[..token_len];
+    if !is_clock_token(token) {
+        return None;
+    }
+    let leading = input.len() - rest.len();
+    *input = &input[leading + token_len..];
+    Some(token.to_string())
+}
+
+fn is_clock_token(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    let parsed = match bytes.len() {
+        5 if bytes[2] == b':' => (
+            parse_two_digits(&bytes[0..2]),
+            parse_two_digits(&bytes[3..5]),
+            Some(0),
+        ),
+        8 if bytes[2] == b':' && bytes[5] == b':' => (
+            parse_two_digits(&bytes[0..2]),
+            parse_two_digits(&bytes[3..5]),
+            parse_two_digits(&bytes[6..8]),
+        ),
+        _ => return false,
+    };
+    matches!(
+        parsed,
+        (Some(hour), Some(minute), Some(second))
+            if hour <= 23 && minute <= 59 && second <= 59
+    )
+}
+
+fn parse_two_digits(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() != 2 || !bytes.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    text.parse().ok()
 }
 
 fn parse_recurrence_field(input: &mut &str) -> ModalResult<ParsedTaskMetadata> {
@@ -430,6 +506,9 @@ fn parse_tag_field(input: &mut &str) -> ModalResult<ParsedTaskMetadata> {
     }
 
     let mut meta = ParsedTaskMetadata::default();
+    if name.eq_ignore_ascii_case("remind") {
+        meta.remind = Some(true);
+    }
     meta.tags.push(name.to_string());
     Ok(meta)
 }
@@ -494,8 +573,28 @@ fn set_standard_field(meta: &mut ParsedTaskMetadata, key: &str, value: &str) {
         "id" => meta.id = Some(value.to_string()),
         "dependson" => meta.depends_on = split_dependency_ids(value),
         "priority" => meta.priority = priority_from_dataview_value(value),
+        "remind" | "reminder" => meta.remind = Some(is_truthy_remind(value)),
         _ => {}
     }
+}
+
+fn is_truthy_remind(value: &str) -> bool {
+    matches!(
+        unquote_token(value).trim().to_ascii_lowercase().as_str(),
+        "true" | "yes" | "y" | "1" | "on"
+    )
+}
+
+fn unquote_token(value: &str) -> &str {
+    let value = value.trim();
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2 {
+        let (first, last) = (bytes[0], bytes[bytes.len() - 1]);
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return value[1..value.len() - 1].trim();
+        }
+    }
+    value
 }
 
 fn split_dependency_ids(value: &str) -> Vec<String> {
@@ -558,6 +657,9 @@ fn merge_metadata(dst: &mut ParsedTaskMetadata, src: ParsedTaskMetadata) {
     }
     dst.tags.extend(src.tags);
     dst.metadata.extend(src.metadata);
+    if src.remind.is_some() {
+        dst.remind = src.remind;
+    }
 }
 
 #[cfg(test)]
@@ -725,5 +827,114 @@ mod tests {
         let task = parse_task_line("- [ ] Decide recurrence 🔁").unwrap();
         assert_eq!(task.description, "Decide recurrence 🔁");
         assert!(task.recurrence.is_none());
+    }
+
+    #[test]
+    fn remind_tag_opts_in_and_is_stripped_from_description() {
+        let task = parse_task_line("- [ ] Stretch 📅 2026-05-01 #remind").unwrap();
+        assert_eq!(task.description, "Stretch");
+        assert!(task.remind);
+        assert_eq!(task.tags, vec!["remind".to_string()]);
+        assert_eq!(task.due.as_deref(), Some("2026-05-01"));
+    }
+
+    #[test]
+    fn remind_tag_is_case_insensitive() {
+        let task = parse_task_line("- [ ] Stretch #Remind").unwrap();
+        assert!(task.remind);
+        assert_eq!(task.tags, vec!["Remind".to_string()]);
+    }
+
+    #[test]
+    fn nested_or_other_tags_do_not_opt_in() {
+        let remind_child = parse_task_line("- [ ] Stretch #remind/morning").unwrap();
+        assert!(!remind_child.remind);
+        let other = parse_task_line("- [ ] Stretch #reminder #urgent").unwrap();
+        assert!(!other.remind);
+    }
+
+    #[test]
+    fn dataview_remind_accepts_truthy_forms() {
+        for line in [
+            "- [ ] A [remind:: true]",
+            "- [ ] A [remind:: TRUE]",
+            "- [ ] A [remind:: yes]",
+            "- [ ] A [remind:: y]",
+            "- [ ] A [remind:: 1]",
+            "- [ ] A [remind:: on]",
+            "- [ ] A (remind:: \"true\")",
+            "- [ ] A [reminder:: Yes]",
+        ] {
+            let task = parse_task_line(line).unwrap();
+            assert!(task.remind, "expected opt-in for {line}");
+        }
+    }
+
+    #[test]
+    fn dataview_remind_false_and_unknown_do_not_opt_in() {
+        for line in [
+            "- [ ] A [remind:: false]",
+            "- [ ] A [remind:: no]",
+            "- [ ] A [remind:: n]",
+            "- [ ] A [remind:: 0]",
+            "- [ ] A [remind:: off]",
+            "- [ ] A [remind:: maybe]",
+            "- [ ] A [reminder:: false]",
+        ] {
+            let task = parse_task_line(line).unwrap();
+            assert!(!task.remind, "expected opt-out for {line}");
+        }
+    }
+
+    #[test]
+    fn unmarked_task_is_not_remind_opt_in() {
+        let task = parse_task_line("- [ ] Buy milk 📅 2026-05-01 🔁 every day").unwrap();
+        assert!(!task.remind);
+        assert_eq!(task.due.as_deref(), Some("2026-05-01"));
+        assert_eq!(task.recurrence.as_deref(), Some("every day"));
+    }
+
+    #[test]
+    fn remind_word_inside_description_does_not_opt_in() {
+        let task = parse_task_line("- [ ] remind me later about the report").unwrap();
+        assert!(!task.remind);
+        assert_eq!(task.description, "remind me later about the report");
+    }
+
+    #[test]
+    fn rightmost_remind_value_wins() {
+        let tag_then_false = parse_task_line("- [ ] Task #remind [remind:: false]").unwrap();
+        assert!(!tag_then_false.remind);
+
+        let false_then_tag = parse_task_line("- [ ] Task [remind:: false] #remind").unwrap();
+        assert!(false_then_tag.remind);
+    }
+
+    #[test]
+    fn emoji_date_keeps_following_clock_time() {
+        let task = parse_task_line("- [ ] Standup 📅 2026-05-01 09:30 #remind").unwrap();
+        assert_eq!(task.description, "Standup");
+        assert_eq!(task.due.as_deref(), Some("2026-05-01T09:30"));
+        assert!(task.remind);
+    }
+
+    #[test]
+    fn emoji_iso_datetime_stays_one_token() {
+        let task = parse_task_line("- [ ] Standup ⏳ 2026-05-01T14:05:30").unwrap();
+        assert_eq!(task.scheduled.as_deref(), Some("2026-05-01T14:05:30"));
+    }
+
+    #[test]
+    fn dataview_datetime_and_recurrence_stay_intact() {
+        let task = parse_task_line(
+            "- [ ] Review [due:: 2026-05-01 09:30] [scheduled:: 2026-04-30T08:00] [start:: 2026-04-29] [repeat:: every weekday] [remind:: true]",
+        )
+        .unwrap();
+        assert_eq!(task.description, "Review");
+        assert_eq!(task.due.as_deref(), Some("2026-05-01 09:30"));
+        assert_eq!(task.scheduled.as_deref(), Some("2026-04-30T08:00"));
+        assert_eq!(task.start.as_deref(), Some("2026-04-29"));
+        assert_eq!(task.recurrence.as_deref(), Some("every weekday"));
+        assert!(task.remind);
     }
 }

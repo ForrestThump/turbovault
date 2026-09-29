@@ -165,4 +165,77 @@ mod tests {
         assert_eq!(tasks[0].position.column, 1);
         assert_eq!(tasks[0].position.offset, 7);
     }
+
+    #[test]
+    fn test_remind_opt_in_gate_and_timing_through_engine() {
+        use turbovault_core::{ReminderAnchor, ReminderLifecycle, remind_eligible_tasks};
+
+        let content = "\
+- [ ] Open dated #remind 📅 2026-05-01
+- [ ] Dataview [remind:: true] [due:: 2026-05-02T09:30] 🔁 every week
+- [ ] Unmarked 📅 2026-05-03
+- [x] Done #remind 📅 2026-05-04
+- [-] Cancelled #remind 📅 2026-05-05
+- [/] In progress #remind ⏳ 2026-05-06
+- [ ] No date #remind 🔁 every day
+";
+        let tasks = parse_tasks(content);
+        assert_eq!(tasks.len(), 7);
+        let task = |prefix: &str| {
+            tasks
+                .iter()
+                .find(|task| task.content.starts_with(prefix))
+                .unwrap_or_else(|| panic!("missing task {prefix}"))
+        };
+
+        let open = task("Open dated");
+        assert!(open.is_remind_eligible());
+        assert!(open.due_time.is_none());
+        assert_eq!(open.checkbox_marker(), ' ');
+
+        let dataview = task("Dataview");
+        assert!(dataview.is_remind_eligible());
+        assert_eq!(
+            dataview.due_time.map(|time| time.to_string()).as_deref(),
+            Some("09:30:00")
+        );
+        assert_eq!(dataview.recurrence.as_deref(), Some("every week"));
+        assert_eq!(
+            dataview.reminder_info().fire().unwrap().anchor,
+            ReminderAnchor::Due
+        );
+
+        let unmarked = task("Unmarked");
+        assert!(!unmarked.remind);
+        assert!(!unmarked.is_remind_eligible());
+
+        let done = task("Done");
+        assert!(done.remind);
+        assert_eq!(done.reminder_lifecycle(), ReminderLifecycle::Done);
+        assert!(!done.is_remind_eligible());
+
+        let cancelled = task("Cancelled");
+        assert_eq!(cancelled.checkbox_marker(), '-');
+        assert_eq!(cancelled.reminder_lifecycle(), ReminderLifecycle::Cancelled);
+        assert!(!cancelled.is_remind_eligible());
+
+        let in_progress = task("In progress");
+        assert_eq!(in_progress.reminder_lifecycle(), ReminderLifecycle::Open);
+        assert!(in_progress.is_remind_eligible());
+        assert_eq!(
+            in_progress.reminder_info().fire().unwrap().anchor,
+            ReminderAnchor::Scheduled
+        );
+
+        let no_date = task("No date");
+        assert!(no_date.remind);
+        assert!(no_date.due_date.is_none());
+        assert!(!no_date.is_remind_eligible());
+
+        assert!(remind_eligible_tasks(&tasks, false).is_empty());
+        let eligible = remind_eligible_tasks(&tasks, true);
+        let mut labels: Vec<_> = eligible.iter().map(|task| task.content.as_str()).collect();
+        labels.sort_unstable();
+        assert_eq!(labels, vec!["Dataview", "In progress", "Open dated"]);
+    }
 }

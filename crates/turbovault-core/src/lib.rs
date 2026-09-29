@@ -20,6 +20,7 @@
 //! - [`metrics`] - Performance monitoring and statistics
 //! - [`multi_vault`] - Multi-vault management support
 //! - [`profiles`] - Configuration profiles for different environments
+//! - [`reminders`] - Opt-in timed reminder metadata for Obsidian Tasks
 //! - [`utils`] - Utility functions and builders
 //!
 //! ## Usage Examples
@@ -82,6 +83,7 @@ pub mod models;
 pub mod multi_vault;
 pub mod okf;
 pub mod profiles;
+pub mod reminders;
 pub mod resilience;
 pub mod task_parser;
 pub mod utils;
@@ -94,6 +96,10 @@ pub use models::*;
 pub use multi_vault::{MultiVaultManager, VaultInfo};
 pub use okf::{Citation, ConceptConformance, ReservedFile, check_concept, concept_id};
 pub use profiles::ConfigProfile;
+pub use reminders::{
+    LocalMinute, RemindEligibleTask, ReminderAnchor, ReminderFire, ReminderLifecycle,
+    TaskReminderInfo, remind_eligible_tasks,
+};
 pub use utils::{
     CSVBuilder, PathValidator, TransactionBuilder, bytes_to_lower_hex, to_json_string,
 };
@@ -115,6 +121,10 @@ pub mod prelude {
     pub use crate::multi_vault::{MultiVaultManager, VaultInfo};
     pub use crate::okf::{Citation, ConceptConformance, ReservedFile, check_concept, concept_id};
     pub use crate::profiles::ConfigProfile;
+    pub use crate::reminders::{
+        LocalMinute, RemindEligibleTask, ReminderAnchor, ReminderFire, ReminderLifecycle,
+        TaskReminderInfo, remind_eligible_tasks,
+    };
     pub use crate::validation::{
         CompositeValidator, ContentValidator, FrontmatterValidator, LinkValidator, Severity,
         ValidationIssue, ValidationReport, Validator,

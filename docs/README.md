@@ -18,6 +18,7 @@ Welcome to the TurboVault documentation. This comprehensive guide will help you 
 - [API Reference](api-reference/index.md) - Complete reference for all MCP tools
 - [Tool Categories](api-reference/tools.md) - Organized tool reference
 - [Obsidian Flavored Markdown](api-reference/ofm.md) - OFM syntax guide
+- [Timed vault reminders](api-reference/timed-reminders.md) - Opt-in Tasks metadata for reminder consumers
 
 ### Deployment
 - [Deployment Guide](deployment/index.md) - Deploy to production
