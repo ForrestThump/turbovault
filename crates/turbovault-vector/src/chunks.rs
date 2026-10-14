@@ -482,6 +482,156 @@ impl ChunkStore {
     }
 }
 
+/// Split `text` into `(start_byte, end_byte)` chunks with optional overlap.
+///
+/// Algorithm:
+/// 1. Split on `\n\n` to get paragraphs.
+/// 2. If a paragraph fits in `max_chars`, it becomes one segment.
+/// 3. If too long, split on `. ` (sentence boundary).
+/// 4. If a sentence is still too long, hard-split at `max_chars` char boundary.
+/// 5. Apply overlap: prepend up to `overlap_chars` bytes from the end of the
+///    previous segment to each subsequent segment's start.
+pub fn chunk_text(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<(usize, usize)> {
+    if text.is_empty() || max_chars == 0 {
+        return vec![];
+    }
+
+    // Build a list of (start_byte, end_byte) segments without overlap first.
+    let mut segments: Vec<(usize, usize)> = Vec::new();
+
+    // Split on paragraph boundaries (\n\n).
+    // We walk the text manually to keep byte offsets accurate.
+    let mut para_start: usize = 0;
+    let mut remaining = text;
+
+    loop {
+        match remaining.find("\n\n") {
+            Some(pos) => {
+                let para = &remaining[..pos];
+                if !para.is_empty() {
+                    split_paragraph(para, para_start, max_chars, &mut segments);
+                }
+                // Skip the "\n\n" separator.
+                para_start += pos + 2;
+                remaining = &remaining[pos + 2..];
+            }
+            None => {
+                // Last paragraph.
+                if !remaining.is_empty() {
+                    split_paragraph(remaining, para_start, max_chars, &mut segments);
+                }
+                break;
+            }
+        }
+    }
+
+    if segments.is_empty() {
+        return segments;
+    }
+
+    // Apply overlap: adjust start_byte of each segment back by up to overlap_chars.
+    if overlap_chars == 0 {
+        return segments;
+    }
+
+    let mut result: Vec<(usize, usize)> = Vec::with_capacity(segments.len());
+    result.push(segments[0]);
+
+    for &(cur_start, cur_end) in &segments[1..] {
+        // Extend the start back by up to `overlap_chars` characters. Walk actual
+        // char boundaries in `text` (never subtract raw byte counts), so the new
+        // start always lands on a valid boundary even amid multi-byte chars.
+        let new_start = text[..cur_start]
+            .char_indices()
+            .rev()
+            .take(overlap_chars)
+            .map(|(idx, _)| idx)
+            .last()
+            .unwrap_or(cur_start);
+        result.push((new_start, cur_end));
+    }
+
+    result
+}
+
+/// Split a single paragraph into segments of at most `max_chars` chars,
+/// appending byte-range pairs (relative to `text` start) into `segments`.
+fn split_paragraph(para: &str, base: usize, max_chars: usize, segments: &mut Vec<(usize, usize)>) {
+    let para_chars = para.chars().count();
+
+    if para_chars <= max_chars {
+        // Whole paragraph is one chunk.
+        segments.push((base, base + para.len()));
+        return;
+    }
+
+    // Too long — split on sentence boundaries ( ".", "!", "?", "。" ).
+    let split_chars = [". ", "! ", "? ", "。"];
+    let mut sent_start_byte: usize = 0;
+    let mut sent_remaining = para;
+
+    loop {
+        match sent_remaining
+            .find(split_chars[0])
+            .or_else(|| sent_remaining.find(split_chars[1]))
+            .or_else(|| sent_remaining.find(split_chars[2]))
+            .or_else(|| sent_remaining.find(split_chars[3]))
+        {
+            Some(pos) => {
+                // Sentence ends at the punctuation (inclusive) — the following
+                // space or CJK period is consumed by advancing sent_start_byte.
+                let punct_end = if sent_remaining.as_bytes()[pos] == 0xE3 {
+                    3 // CJK period "。" is 3 bytes, no trailing space
+                } else {
+                    1 // just the punctuation character
+                };
+                let sentence_end = pos + punct_end;
+                let delimiter_len = if sent_remaining.as_bytes()[pos] == 0xE3 {
+                    3
+                } else {
+                    2 // punctuation + space
+                };
+                let sentence = &sent_remaining[..sentence_end];
+                let abs_start = base + sent_start_byte;
+                push_hard_chunks(sentence, abs_start, max_chars, segments);
+
+                sent_start_byte += pos + delimiter_len;
+                sent_remaining = &sent_remaining[pos + delimiter_len..];
+            }
+            None => {
+                // Last sentence fragment.
+                if !sent_remaining.is_empty() {
+                    let abs_start = base + sent_start_byte;
+                    push_hard_chunks(sent_remaining, abs_start, max_chars, segments);
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// Push one or more hard-split chunks from `text` (which has absolute start
+/// byte `base`) each of at most `max_chars` characters.
+fn push_hard_chunks(text: &str, base: usize, max_chars: usize, segments: &mut Vec<(usize, usize)>) {
+    let mut char_count = 0usize;
+    let mut chunk_start_byte: usize = 0; // relative to `text`
+
+    for (byte_idx, _ch) in text.char_indices() {
+        if char_count == max_chars {
+            // Emit the current chunk.
+            segments.push((base + chunk_start_byte, base + byte_idx));
+            chunk_start_byte = byte_idx;
+            char_count = 0;
+        }
+        char_count += 1;
+    }
+
+    // Emit the final (possibly partial) chunk.
+    if chunk_start_byte < text.len() {
+        segments.push((base + chunk_start_byte, base + text.len()));
+    }
+}
+
 #[cfg(test)]
 #[cfg(feature = "local")]
 mod tests {
@@ -686,155 +836,5 @@ mod tests {
             )
             .unwrap();
         assert_eq!(store.next_chunk_id().unwrap(), id4 + 1);
-    }
-}
-
-/// Split `text` into `(start_byte, end_byte)` chunks with optional overlap.
-///
-/// Algorithm:
-/// 1. Split on `\n\n` to get paragraphs.
-/// 2. If a paragraph fits in `max_chars`, it becomes one segment.
-/// 3. If too long, split on `. ` (sentence boundary).
-/// 4. If a sentence is still too long, hard-split at `max_chars` char boundary.
-/// 5. Apply overlap: prepend up to `overlap_chars` bytes from the end of the
-///    previous segment to each subsequent segment's start.
-pub fn chunk_text(text: &str, max_chars: usize, overlap_chars: usize) -> Vec<(usize, usize)> {
-    if text.is_empty() || max_chars == 0 {
-        return vec![];
-    }
-
-    // Build a list of (start_byte, end_byte) segments without overlap first.
-    let mut segments: Vec<(usize, usize)> = Vec::new();
-
-    // Split on paragraph boundaries (\n\n).
-    // We walk the text manually to keep byte offsets accurate.
-    let mut para_start: usize = 0;
-    let mut remaining = text;
-
-    loop {
-        match remaining.find("\n\n") {
-            Some(pos) => {
-                let para = &remaining[..pos];
-                if !para.is_empty() {
-                    split_paragraph(para, para_start, max_chars, &mut segments);
-                }
-                // Skip the "\n\n" separator.
-                para_start += pos + 2;
-                remaining = &remaining[pos + 2..];
-            }
-            None => {
-                // Last paragraph.
-                if !remaining.is_empty() {
-                    split_paragraph(remaining, para_start, max_chars, &mut segments);
-                }
-                break;
-            }
-        }
-    }
-
-    if segments.is_empty() {
-        return segments;
-    }
-
-    // Apply overlap: adjust start_byte of each segment back by up to overlap_chars.
-    if overlap_chars == 0 {
-        return segments;
-    }
-
-    let mut result: Vec<(usize, usize)> = Vec::with_capacity(segments.len());
-    result.push(segments[0]);
-
-    for &(cur_start, cur_end) in &segments[1..] {
-        // Extend the start back by up to `overlap_chars` characters. Walk actual
-        // char boundaries in `text` (never subtract raw byte counts), so the new
-        // start always lands on a valid boundary even amid multi-byte chars.
-        let new_start = text[..cur_start]
-            .char_indices()
-            .rev()
-            .take(overlap_chars)
-            .map(|(idx, _)| idx)
-            .last()
-            .unwrap_or(cur_start);
-        result.push((new_start, cur_end));
-    }
-
-    result
-}
-
-/// Split a single paragraph into segments of at most `max_chars` chars,
-/// appending byte-range pairs (relative to `text` start) into `segments`.
-fn split_paragraph(para: &str, base: usize, max_chars: usize, segments: &mut Vec<(usize, usize)>) {
-    let para_chars = para.chars().count();
-
-    if para_chars <= max_chars {
-        // Whole paragraph is one chunk.
-        segments.push((base, base + para.len()));
-        return;
-    }
-
-    // Too long — split on sentence boundaries ( ".", "!", "?", "。" ).
-    let split_chars = [". ", "! ", "? ", "。"];
-    let mut sent_start_byte: usize = 0;
-    let mut sent_remaining = para;
-
-    loop {
-        match sent_remaining
-            .find(split_chars[0])
-            .or_else(|| sent_remaining.find(split_chars[1]))
-            .or_else(|| sent_remaining.find(split_chars[2]))
-            .or_else(|| sent_remaining.find(split_chars[3]))
-        {
-            Some(pos) => {
-                // Sentence ends at the punctuation (inclusive) — the following
-                // space or CJK period is consumed by advancing sent_start_byte.
-                let punct_end = if sent_remaining.as_bytes()[pos] == 0xE3 {
-                    3 // CJK period "。" is 3 bytes, no trailing space
-                } else {
-                    1 // just the punctuation character
-                };
-                let sentence_end = pos + punct_end;
-                let delimiter_len = if sent_remaining.as_bytes()[pos] == 0xE3 {
-                    3
-                } else {
-                    2 // punctuation + space
-                };
-                let sentence = &sent_remaining[..sentence_end];
-                let abs_start = base + sent_start_byte;
-                push_hard_chunks(sentence, abs_start, max_chars, segments);
-
-                sent_start_byte += pos + delimiter_len;
-                sent_remaining = &sent_remaining[pos + delimiter_len..];
-            }
-            None => {
-                // Last sentence fragment.
-                if !sent_remaining.is_empty() {
-                    let abs_start = base + sent_start_byte;
-                    push_hard_chunks(sent_remaining, abs_start, max_chars, segments);
-                }
-                break;
-            }
-        }
-    }
-}
-
-/// Push one or more hard-split chunks from `text` (which has absolute start
-/// byte `base`) each of at most `max_chars` characters.
-fn push_hard_chunks(text: &str, base: usize, max_chars: usize, segments: &mut Vec<(usize, usize)>) {
-    let mut char_count = 0usize;
-    let mut chunk_start_byte: usize = 0; // relative to `text`
-
-    for (byte_idx, _ch) in text.char_indices() {
-        if char_count == max_chars {
-            // Emit the current chunk.
-            segments.push((base + chunk_start_byte, base + byte_idx));
-            chunk_start_byte = byte_idx;
-            char_count = 0;
-        }
-        char_count += 1;
-    }
-
-    // Emit the final (possibly partial) chunk.
-    if chunk_start_byte < text.len() {
-        segments.push((base + chunk_start_byte, base + text.len()));
     }
 }

@@ -71,6 +71,8 @@ impl FileProvider {
         tags = ["write"],
         destructive = true,
     )]
+    // MCP tool signature: each parameter is a distinct tool argument.
+    #[allow(clippy::too_many_arguments)]
     async fn write_note(
         &self,
         path: String,

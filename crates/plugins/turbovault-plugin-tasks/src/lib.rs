@@ -328,12 +328,12 @@ impl TasksProvider {
         apply_edits(&mut task, args)?;
 
         // Always inject the global-filter tag — the agent never needs to pass it.
-        if let Some(filter) = &global_filter {
-            if let Some(tag) = filter.strip_prefix('#') {
-                let tag = tag.to_string();
-                if !task.tags.iter().any(|t| t.eq_ignore_ascii_case(&tag)) {
-                    task.tags.push(tag);
-                }
+        if let Some(filter) = &global_filter
+            && let Some(tag) = filter.strip_prefix('#')
+        {
+            let tag = tag.to_string();
+            if !task.tags.iter().any(|t| t.eq_ignore_ascii_case(&tag)) {
+                task.tags.push(tag);
             }
         }
 

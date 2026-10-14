@@ -16,19 +16,15 @@
 use serde_json::Value;
 
 /// Which trailing-metadata dialect the user's Tasks plugin reads and writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TaskFormat {
     /// `📅 2026-07-19 ⏫ 🔁 every week` — the Tasks plugin's emoji signifiers.
+    ///
+    /// This is the Tasks plugin's own default (`tasksPluginEmoji`).
+    #[default]
     Emoji,
     /// `[due:: 2026-07-19] [priority:: high]` — Dataview inline fields.
     Dataview,
-}
-
-impl Default for TaskFormat {
-    fn default() -> Self {
-        // Matches the Tasks plugin's own default (`tasksPluginEmoji`).
-        TaskFormat::Emoji
-    }
 }
 
 /// Where a resolved [`TasksConfig`] came from — surfaced by `tasks_config` so
