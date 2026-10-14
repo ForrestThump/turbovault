@@ -837,15 +837,16 @@ mod tests {
             .await
             .expect("select vault");
 
-        // Catalog: the base 74 tools plus exactly the module's seven, advertised
+        // Catalog: the base 74 tools plus exactly the module's eight, advertised
         // only under their namespaced ids — never the bare local names.
         let advertised = server.list_tools();
         assert_eq!(
             advertised.len(),
-            81,
-            "tasks module must add exactly seven tools to the 74-tool base"
+            82,
+            "tasks module must add exactly eight tools to the 74-tool base"
         );
         for name in [
+            "tasks_create",
             "tasks_list",
             "tasks_overdue",
             "tasks_tags",
@@ -860,7 +861,7 @@ mod tests {
             );
         }
         for bare in [
-            "list", "overdue", "tags", "complete", "update", "delete", "config",
+            "create", "list", "overdue", "tags", "complete", "update", "delete", "config",
         ] {
             assert!(
                 !advertised.iter().any(|tool| tool.name == bare),
