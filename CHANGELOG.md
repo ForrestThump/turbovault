@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Obsidian Tasks status and reusable global filter**: `TaskItem` carries `status` (`todo`, `in_progress`, `done`, `cancelled`) from the checkbox marker. `is_completed` stays and is true only for done. `tasks_list` open filters exclude cancelled tasks, and `cancelled` is its own filter. `TasksConfig::accepts` and `TasksConfig::display_text` are public, so a library caller can apply the vault's global filter without the MCP tool.
 - **Compiled-in plugin boundary** ([#34](https://github.com/Epistates/turbovault/issues/34)): Added the default-off `plugin-api` feature and the publishable `turbovault-plugin-api` crate. Plugins receive a curated CAS-only `VaultApi`, an object-safe tool provider contract, redacted request context, strict MCP namespaces, and a bounded hook bus with explicit lag/resync and close semantics.
 - **Best-effort hook provenance** ([#33](https://github.com/Epistates/turbovault/issues/33)): Plugin writes can carry source and correlation metadata into advisory event envelopes. Attribution is explicitly not an authentication boundary, and uncorrelated events fail open as external-or-unknown.
 

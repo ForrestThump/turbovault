@@ -19,7 +19,7 @@ use crate::config::TaskFormat;
 /// canonical `- ` bullet. Callers editing an existing line should instead reuse
 /// its original indent/marker and call [`render_body`].
 pub fn to_markdown_line(task: &TaskItem, format: TaskFormat) -> String {
-    let box_char = if task.is_completed { 'x' } else { ' ' };
+    let box_char = task.status.marker();
     format!("- [{box_char}] {}", render_body(task, format))
 }
 
@@ -168,9 +168,10 @@ mod tests {
             .unwrap_or_else(|| panic!("rendered line did not parse as a task: {rendered:?}"));
 
         assert_eq!(original.content, reparsed.content, "content ({rendered:?})");
+        assert_eq!(original.status, reparsed.status, "status ({rendered:?})");
         assert_eq!(
             original.is_completed, reparsed.is_completed,
-            "status ({rendered:?})"
+            "completed ({rendered:?})"
         );
         assert_eq!(
             original.priority, reparsed.priority,
@@ -239,6 +240,8 @@ mod tests {
         for line in [
             "- [ ] Buy milk 📅 2026-05-15 ⏫ #errand",
             "- [x] Ship it ✅ 2026-07-10 🔁 every week #work ^ship-1",
+            "- [/] Still writing 📅 2026-05-15",
+            "- [-] Dropped 📅 2026-05-15",
             "- [ ] Blocked 🏁 keep 🆔 dcf64c ⛔ abc123,def456",
             "- [ ] Bare description with no metadata",
         ] {
