@@ -215,12 +215,87 @@ pub struct Tag {
     pub is_nested: bool, // #parent/child
 }
 
+/// Obsidian Tasks checkbox status.
+///
+/// `Pending` is the TODO state: `[ ]`, and any other marker the parser accepts
+/// that Obsidian Tasks treats as TODO. Done and cancelled are not open.
+///
+/// JSON uses `todo` / `done` / `in_progress` / `cancelled`. The previous
+/// PascalCase names still deserialize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TaskStatus {
+    /// `[ ]` — pending / todo.
+    #[default]
+    #[serde(rename = "todo", alias = "Pending", alias = "pending")]
+    Pending,
+    /// `[x]` or `[X]`.
+    #[serde(rename = "done", alias = "Done")]
+    Done,
+    /// `[/]`.
+    #[serde(rename = "in_progress", alias = "InProgress")]
+    InProgress,
+    /// `[-]`.
+    #[serde(rename = "cancelled", alias = "Cancelled")]
+    Cancelled,
+}
+
+impl TaskStatus {
+    /// True only for [`TaskStatus::Done`]. Cancelled is not completed.
+    #[must_use]
+    pub fn is_completed(&self) -> bool {
+        matches!(self, TaskStatus::Done)
+    }
+
+    /// Todo and in progress. Done and cancelled are not open.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        matches!(self, TaskStatus::Pending | TaskStatus::InProgress)
+    }
+
+    /// Map a checkbox marker. Unknown markers are TODO, matching Obsidian Tasks.
+    #[must_use]
+    pub fn from_marker(c: char) -> Self {
+        match c {
+            'x' | 'X' => TaskStatus::Done,
+            '/' => TaskStatus::InProgress,
+            '-' => TaskStatus::Cancelled,
+            _ => TaskStatus::Pending,
+        }
+    }
+
+    /// Stable name used in JSON and tool output.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskStatus::Pending => "todo",
+            TaskStatus::Done => "done",
+            TaskStatus::InProgress => "in_progress",
+            TaskStatus::Cancelled => "cancelled",
+        }
+    }
+
+    /// Checkbox character written for this status.
+    #[must_use]
+    pub fn marker(self) -> char {
+        match self {
+            TaskStatus::Pending => ' ',
+            TaskStatus::Done => 'x',
+            TaskStatus::InProgress => '/',
+            TaskStatus::Cancelled => '-',
+        }
+    }
+}
+
 /// A task item in vault content
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskItem {
     /// Task description with trailing Obsidian Tasks metadata removed.
     pub content: String,
+    /// True only when [`status`](TaskItem::status) is [`TaskStatus::Done`].
     pub is_completed: bool,
+    /// Checkbox status. Older JSON omits this and deserializes as todo.
+    #[serde(default)]
+    pub status: TaskStatus,
     pub position: SourcePosition,
     pub created_date: Option<NaiveDate>,
     pub scheduled_date: Option<NaiveDate>,
@@ -267,6 +342,11 @@ impl TaskItem {
         Self {
             content: parsed.description,
             is_completed,
+            status: if is_completed {
+                TaskStatus::Done
+            } else {
+                TaskStatus::Pending
+            },
             position,
             created_date: parse_date_opt(parsed.created.as_deref()),
             scheduled_date: parse_date_opt(parsed.scheduled.as_deref()),
@@ -352,17 +432,28 @@ impl fmt::Display for TaskPriority {
 pub struct TaskBuilder {
     pub content: String,
     pub is_completed: bool,
+    /// Checkbox status. Left at the default, a set `is_completed` flag is
+    /// promoted to [`TaskStatus::Done`] by [`TaskBuilder::build`].
+    pub status: TaskStatus,
     pub position: SourcePosition,
 }
 
 impl TaskBuilder {
     pub fn build(&mut self) -> TaskItem {
         let parsed: ParsedTaskMetadata = crate::task_parser::parse_task_content(&self.content);
-        let task_item = TaskItem::from_parsed_metadata(
+        let is_completed_flag = std::mem::take(&mut self.is_completed);
+        let mut status = std::mem::take(&mut self.status);
+        // Callers that only flip `is_completed` still get a Done task.
+        if is_completed_flag && status == TaskStatus::Pending {
+            status = TaskStatus::Done;
+        }
+        let mut task_item = TaskItem::from_parsed_metadata(
             parsed,
-            std::mem::take(&mut self.is_completed),
+            status.is_completed(),
             std::mem::take(&mut self.position),
         );
+        task_item.status = status;
+        task_item.is_completed = status.is_completed();
         self.content.clear();
         task_item
     }
@@ -949,6 +1040,9 @@ mod tests {
         );
 
         assert_eq!(task.content, "Review PR");
+        assert!(!task.is_completed);
+        assert_eq!(task.status, TaskStatus::Pending);
+        assert!(task.status.is_open());
         assert_eq!(
             task.due_date.map(|date| date.to_string()).as_deref(),
             Some("2026-05-01")
@@ -999,6 +1093,8 @@ mod tests {
 
         assert_eq!(task.content, "Legacy task");
         assert!(!task.is_completed);
+        assert_eq!(task.status, TaskStatus::Pending);
+        assert!(task.status.is_open());
         assert_eq!(task.priority, TaskPriority::Normal);
         assert!(task.due_date.is_none());
         assert!(task.metadata.is_empty());
@@ -1010,6 +1106,7 @@ mod tests {
             r#"{
                 "content": "Modern task",
                 "is_completed": true,
+                "status": "done",
                 "position": {
                     "line": 2,
                     "column": 1,
@@ -1038,6 +1135,7 @@ mod tests {
 
         assert_eq!(task.content, "Modern task");
         assert!(task.is_completed);
+        assert_eq!(task.status, TaskStatus::Done);
         assert_eq!(
             task.created_date.map(|date| date.to_string()).as_deref(),
             Some("2026-04-28")
@@ -1073,6 +1171,80 @@ mod tests {
             task.metadata.get("project").map(String::as_str),
             Some("[[Team Work]]")
         );
+    }
+
+    #[test]
+    fn test_task_status_json_names_and_legacy_aliases() {
+        for (status, wire) in [
+            (TaskStatus::Pending, "todo"),
+            (TaskStatus::Done, "done"),
+            (TaskStatus::InProgress, "in_progress"),
+            (TaskStatus::Cancelled, "cancelled"),
+        ] {
+            assert_eq!(status.as_str(), wire);
+            assert_eq!(serde_json::to_value(status).unwrap(), wire);
+            let parsed: TaskStatus =
+                serde_json::from_value(serde_json::Value::String(wire.into())).unwrap();
+            assert_eq!(parsed, status);
+            assert_eq!(TaskStatus::from_marker(status.marker()), status);
+        }
+
+        let legacy: TaskStatus = serde_json::from_str("\"Pending\"").unwrap();
+        assert_eq!(legacy, TaskStatus::Pending);
+        let legacy_done: TaskStatus = serde_json::from_str("\"Done\"").unwrap();
+        assert_eq!(legacy_done, TaskStatus::Done);
+        let legacy_progress: TaskStatus = serde_json::from_str("\"InProgress\"").unwrap();
+        assert_eq!(legacy_progress, TaskStatus::InProgress);
+        let legacy_cancelled: TaskStatus = serde_json::from_str("\"Cancelled\"").unwrap();
+        assert_eq!(legacy_cancelled, TaskStatus::Cancelled);
+    }
+
+    #[test]
+    fn test_task_item_status_defaults_when_is_completed_is_set() {
+        // `#[serde(default)]` does not infer status from `is_completed`.
+        let task: TaskItem = serde_json::from_str(
+            r#"{
+                "content": "Old completed task",
+                "is_completed": true,
+                "position": { "line": 1, "column": 1, "offset": 0, "length": 4 }
+            }"#,
+        )
+        .unwrap();
+        assert!(task.is_completed);
+        assert_eq!(task.status, TaskStatus::Pending);
+    }
+
+    #[test]
+    fn test_task_builder_promotes_completed_flag_and_keeps_explicit_status() {
+        let mut done = TaskBuilder {
+            content: "Done via flag".to_string(),
+            is_completed: true,
+            ..TaskBuilder::default()
+        };
+        let done = done.build();
+        assert_eq!(done.status, TaskStatus::Done);
+        assert!(done.is_completed);
+
+        let mut cancelled = TaskBuilder {
+            content: "Dropped".to_string(),
+            is_completed: false,
+            status: TaskStatus::Cancelled,
+            position: SourcePosition::start(),
+        };
+        let cancelled = cancelled.build();
+        assert_eq!(cancelled.status, TaskStatus::Cancelled);
+        assert!(!cancelled.is_completed);
+        assert!(!cancelled.status.is_open());
+
+        let mut progress = TaskBuilder {
+            content: "Working".to_string(),
+            status: TaskStatus::InProgress,
+            ..TaskBuilder::default()
+        };
+        let progress = progress.build();
+        assert_eq!(progress.status, TaskStatus::InProgress);
+        assert!(progress.status.is_open());
+        assert!(!progress.is_completed);
     }
 
     #[test]

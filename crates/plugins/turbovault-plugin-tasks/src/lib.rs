@@ -46,7 +46,7 @@ use chrono::NaiveDate;
 use serde_json::{Value, json};
 use tokio::sync::OnceCell;
 use turbomcp_types::ToolInputSchema;
-use turbovault_core::{TaskItem, TaskPriority};
+use turbovault_core::{TaskItem, TaskPriority, TaskStatus};
 use turbovault_plugin_api::{
     Plugin, PluginContext, PluginDescriptor, PluginError, PluginProvider, PluginRequestContext,
     PluginResult, Tool, ToolResult, VaultApi, WriteNoteRequest, WritePrecondition, WriteProvenance,
@@ -308,6 +308,7 @@ impl TasksProvider {
         let mut task = TaskItem {
             content,
             is_completed: false,
+            status: TaskStatus::Pending,
             position: Default::default(),
             created_date: None,
             scheduled_date: None,
