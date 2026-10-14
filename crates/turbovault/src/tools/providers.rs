@@ -678,7 +678,11 @@ mod tests {
         let temp = tempfile::TempDir::new().expect("temp vault");
         // A config file in the vault's non-note space, to exercise the config
         // capability (list_configs / read_config) alongside the note APIs.
-        let config_dir = temp.path().join(".obsidian").join("plugins").join("example");
+        let config_dir = temp
+            .path()
+            .join(".obsidian")
+            .join("plugins")
+            .join("example");
         std::fs::create_dir_all(&config_dir).expect("config dir");
         std::fs::write(config_dir.join("data.json"), br#"{"k":"v"}"#).expect("write config");
 
@@ -855,7 +859,9 @@ mod tests {
                 "missing namespaced tool {name}"
             );
         }
-        for bare in ["list", "overdue", "tags", "complete", "update", "delete", "config"] {
+        for bare in [
+            "list", "overdue", "tags", "complete", "update", "delete", "config",
+        ] {
             assert!(
                 !advertised.iter().any(|tool| tool.name == bare),
                 "unprefixed tool {bare} must not be public"
@@ -999,8 +1005,7 @@ mod tests {
         );
         assert_eq!(updated["format"], "emoji");
         assert_eq!(
-            updated["line_text"],
-            "- [ ] write report ⏫ 📅 2099-01-01 #work",
+            updated["line_text"], "- [ ] write report ⏫ 📅 2099-01-01 #work",
             "priority emoji is inserted and the line is re-rendered canonically"
         );
 
@@ -1045,8 +1050,7 @@ mod tests {
         );
         assert_eq!(recur["spawned_next_occurrence"], true);
         assert_eq!(
-            recur["next_occurrence_line"],
-            "- [ ] water plants 🔁 every week 📅 2026-07-17",
+            recur["next_occurrence_line"], "- [ ] water plants 🔁 every week 📅 2026-07-17",
             "the due date advances by one week and the line is re-rendered"
         );
     }
@@ -1122,7 +1126,10 @@ mod tests {
                 .await
                 .expect("tasks_list"),
         );
-        assert_eq!(all["count"], 1, "global filter keeps only #task-bearing tasks");
+        assert_eq!(
+            all["count"], 1,
+            "global filter keeps only #task-bearing tasks"
+        );
 
         // Edits render in the configured dataview dialect, not emoji.
         let updated = structured(

@@ -143,11 +143,19 @@ fn detect_format(sample: &str) -> Option<TaskFormat> {
         .map(|marker| sample.matches(marker).count())
         .sum::<usize>();
 
-    let dataview = ["[due::", "[scheduled::", "[start::", "[created::", "[completion::",
-        "[priority::", "[repeat::", "[recurrence::"]
-        .iter()
-        .map(|marker| sample.matches(marker).count())
-        .sum::<usize>();
+    let dataview = [
+        "[due::",
+        "[scheduled::",
+        "[start::",
+        "[created::",
+        "[completion::",
+        "[priority::",
+        "[repeat::",
+        "[recurrence::",
+    ]
+    .iter()
+    .map(|marker| sample.matches(marker).count())
+    .sum::<usize>();
 
     match (emoji, dataview) {
         (0, 0) => None,
@@ -186,7 +194,10 @@ mod tests {
     #[test]
     fn heuristic_detects_dataview_over_emoji() {
         let sample = "- [ ] a [due:: 2026-01-01]\n- [ ] b [priority:: high]";
-        assert_eq!(TasksConfig::from_heuristic(sample).format, TaskFormat::Dataview);
+        assert_eq!(
+            TasksConfig::from_heuristic(sample).format,
+            TaskFormat::Dataview
+        );
         assert_eq!(
             TasksConfig::from_heuristic(sample).source,
             ConfigSource::Heuristic
@@ -196,11 +207,17 @@ mod tests {
     #[test]
     fn heuristic_detects_emoji() {
         let sample = "- [ ] a 📅 2026-01-01 ⏫";
-        assert_eq!(TasksConfig::from_heuristic(sample).format, TaskFormat::Emoji);
+        assert_eq!(
+            TasksConfig::from_heuristic(sample).format,
+            TaskFormat::Emoji
+        );
     }
 
     #[test]
     fn heuristic_falls_back_to_default_without_signal() {
-        assert_eq!(TasksConfig::from_heuristic("- [ ] plain task").source, ConfigSource::Default);
+        assert_eq!(
+            TasksConfig::from_heuristic("- [ ] plain task").source,
+            ConfigSource::Default
+        );
     }
 }

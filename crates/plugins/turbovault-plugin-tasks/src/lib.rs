@@ -239,8 +239,10 @@ impl TasksProvider {
     async fn config(&self) -> &TasksConfig {
         self.config
             .get_or_init(|| async {
-                if let Ok(Some(bytes)) =
-                    self.vault.read_config(config::OBSIDIAN_TASKS_DATA_PATH).await
+                if let Ok(Some(bytes)) = self
+                    .vault
+                    .read_config(config::OBSIDIAN_TASKS_DATA_PATH)
+                    .await
                     && let Some(resolved) = TasksConfig::from_obsidian_data(&bytes)
                 {
                     return resolved;
@@ -336,8 +338,11 @@ impl TasksProvider {
         }
 
         let separator = line_sep(&snapshot.content);
-        let mut lines: Vec<String> =
-            snapshot.content.split(separator).map(str::to_string).collect();
+        let mut lines: Vec<String> = snapshot
+            .content
+            .split(separator)
+            .map(str::to_string)
+            .collect();
 
         // Determine insertion line: after the specified line, after the last
         // existing task, or at end of note.
@@ -428,7 +433,11 @@ impl TasksProvider {
                         // A tag filter (the Obsidian default) matches on the tag
                         // token, not a substring of the prose.
                         let tag = tag.to_ascii_lowercase();
-                        if !task.tags.iter().any(|value| value.eq_ignore_ascii_case(&tag)) {
+                        if !task
+                            .tags
+                            .iter()
+                            .any(|value| value.eq_ignore_ascii_case(&tag))
+                        {
                             continue;
                         }
                     } else {
@@ -554,7 +563,11 @@ impl TasksProvider {
         let task = task_at_line(&snapshot.content, line, path)?;
 
         let separator = line_sep(&snapshot.content);
-        let mut lines: Vec<String> = snapshot.content.split(separator).map(str::to_string).collect();
+        let mut lines: Vec<String> = snapshot
+            .content
+            .split(separator)
+            .map(str::to_string)
+            .collect();
         let idx = line - 1;
         if idx >= lines.len() {
             return Err(PluginError::invalid_input(format!(
@@ -590,7 +603,10 @@ impl TasksProvider {
 
             let format = self.config().await.format;
             let (indent, marker) = split_list_prefix(&lines[idx]);
-            let rendered = format!("{indent}{marker} [ ] {}", render::render_body(&next, format));
+            let rendered = format!(
+                "{indent}{marker} [ ] {}",
+                render::render_body(&next, format)
+            );
             lines.insert(idx + 1, rendered.clone());
             next_occurrence = Some(rendered);
         }
@@ -635,8 +651,11 @@ impl TasksProvider {
 
         let format = self.config().await.format;
         let separator = line_sep(&snapshot.content);
-        let mut lines: Vec<String> =
-            snapshot.content.split(separator).map(str::to_string).collect();
+        let mut lines: Vec<String> = snapshot
+            .content
+            .split(separator)
+            .map(str::to_string)
+            .collect();
         let idx = line - 1;
         if idx >= lines.len() {
             return Err(PluginError::invalid_input(format!(
@@ -699,7 +718,11 @@ impl TasksProvider {
         let task = task_at_line(&snapshot.content, line, path)?;
 
         let separator = line_sep(&snapshot.content);
-        let mut lines: Vec<String> = snapshot.content.split(separator).map(str::to_string).collect();
+        let mut lines: Vec<String> = snapshot
+            .content
+            .split(separator)
+            .map(str::to_string)
+            .collect();
         let idx = line - 1;
         if idx >= lines.len() {
             return Err(PluginError::invalid_input(format!(
@@ -769,8 +792,9 @@ fn verify_version(args: &Value, actual: &str) -> PluginResult<()> {
 }
 
 fn parse_date(raw: &str, field: &str) -> PluginResult<NaiveDate> {
-    NaiveDate::parse_from_str(raw, "%Y-%m-%d")
-        .map_err(|_| PluginError::invalid_input(format!("invalid {field} {raw:?} — use YYYY-MM-DD")))
+    NaiveDate::parse_from_str(raw, "%Y-%m-%d").map_err(|_| {
+        PluginError::invalid_input(format!("invalid {field} {raw:?} — use YYYY-MM-DD"))
+    })
 }
 
 fn provenance(context: &PluginRequestContext, note: String) -> WriteProvenance {
@@ -783,7 +807,11 @@ fn provenance(context: &PluginRequestContext, note: String) -> WriteProvenance {
 
 /// `"\r\n"` if the note uses Windows line endings, else `"\n"`.
 fn line_sep(content: &str) -> &'static str {
-    if content.contains("\r\n") { "\r\n" } else { "\n" }
+    if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
 }
 
 /// Find the parsed task on `line` (1-based), erroring if none is there.
@@ -922,8 +950,11 @@ fn apply_edits(task: &mut TaskItem, args: &Value) -> PluginResult<()> {
             .into_iter()
             .map(|raw| raw.trim().trim_start_matches('#').to_ascii_lowercase())
             .collect();
-        task.tags
-            .retain(|tag| !removals.iter().any(|removal| removal.eq_ignore_ascii_case(tag)));
+        task.tags.retain(|tag| {
+            !removals
+                .iter()
+                .any(|removal| removal.eq_ignore_ascii_case(tag))
+        });
     }
 
     Ok(())
@@ -1007,9 +1038,11 @@ mod tests {
 
     #[test]
     fn completes_an_indented_task_and_preserves_metadata() {
-        let out =
-            mark_line_completed("    - [ ] pay rent 📅 2026-07-01", "2026-07-18".parse().unwrap())
-                .unwrap();
+        let out = mark_line_completed(
+            "    - [ ] pay rent 📅 2026-07-01",
+            "2026-07-18".parse().unwrap(),
+        )
+        .unwrap();
         assert_eq!(out, "    - [x] pay rent 📅 2026-07-01 ✅ 2026-07-18");
     }
 
