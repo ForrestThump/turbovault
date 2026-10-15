@@ -843,7 +843,7 @@ mod tests {
                 .await
                 .unwrap();
             assert!(
-                index.len() > 0,
+                !index.is_empty(),
                 "index should have entries after initial index"
             );
 

@@ -11,8 +11,9 @@ Tools are advertised namespaced under the plugin id `tasks`:
 
 | Tool | Kind | Purpose |
 |---|---|---|
-| `tasks_list`     | read  | list tasks (status + tag filters) |
-| `tasks_overdue`  | read  | pending tasks past their due date |
+| `tasks_create`   | write | append a task line; the global-filter tag is added automatically |
+| `tasks_list`     | read  | list tasks (status + tag filters). Each task includes `status`: `todo`, `in_progress`, `done`, or `cancelled` |
+| `tasks_overdue`  | read  | open tasks (todo or in progress) past their due date |
 | `tasks_tags`     | read  | distinct inline task tags |
 | `tasks_complete` | write | flip checkbox to `[x]` + stamp `✅ <date>`; spawn the next occurrence of a recurring task |
 | `tasks_update`   | write | edit fields (incl. `add_tags`/`remove_tags`) and re-render the line in the vault's dialect |
@@ -54,6 +55,27 @@ resolves two settings, in priority order:
 `tasks_config` reports the resolved settings and their `source`
 (`obsidian-data` | `heuristic` | `default`). The global filter, when set, scopes
 every read to the tasks your Tasks plugin would consider real.
+
+`tasks_list` status `pending`, `open`, `todo`, and `incomplete` return todo and
+in-progress tasks. Cancelled (`[-]`) is not open. `completed` and `done` return
+done tasks only. `cancelled` returns cancelled tasks only. `all` returns every
+status.
+
+Library callers can apply the same filter without the MCP tool:
+
+```rust
+let config = TasksConfig::from_obsidian_data(data_json).expect("tasks data.json");
+let open: Vec<_> = turbovault_parser::parse_tasks(note)
+    .into_iter()
+    .filter(|task| config.accepts(task))
+    .filter(|task| task.status.is_open())
+    .collect();
+```
+
+`TasksConfig::accepts` matches a `#tag` filter as a case-insensitive tag token
+(`#task` matches `#Task`, not `#tasks` or `#taskforce`). Any other filter is a
+case-insensitive substring of the description. `TasksConfig::display_text`
+removes that filter from the description when `removeGlobalFilter` is set.
 
 > **Note:** `VaultApi::read_config` is a fork-local addition to the plugin API
 > (a non-breaking default method, `None` where a host declines it). It is the

@@ -114,7 +114,7 @@ pub mod prelude {
     pub use crate::models::{
         Block, Callout, CalloutType, ContentBlock, FileMetadata, Frontmatter, Heading,
         InlineElement, LineIndex, Link, LinkType, ListItem, SourcePosition, TableAlignment, Tag,
-        TaskItem, VaultFile,
+        TaskItem, TaskStatus, VaultFile,
     };
     pub use crate::multi_vault::{MultiVaultManager, VaultInfo};
     pub use crate::okf::{Citation, ConceptConformance, ReservedFile, check_concept, concept_id};

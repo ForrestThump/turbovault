@@ -94,9 +94,14 @@ mod tests {
 
     #[test]
     fn every_day_advances_the_due_date() {
-        let (due, _, _) =
-            compute_next_occurrence("every day", Some(date("2026-07-19")), None, None, date("2026-07-19"))
-                .unwrap();
+        let (due, _, _) = compute_next_occurrence(
+            "every day",
+            Some(date("2026-07-19")),
+            None,
+            None,
+            date("2026-07-19"),
+        )
+        .unwrap();
         assert_eq!(due, Some(date("2026-07-20")));
     }
 
@@ -115,9 +120,14 @@ mod tests {
 
     #[test]
     fn month_clamps_to_last_valid_day() {
-        let (due, _, _) =
-            compute_next_occurrence("every month", Some(date("2026-01-31")), None, None, date("2026-01-31"))
-                .unwrap();
+        let (due, _, _) = compute_next_occurrence(
+            "every month",
+            Some(date("2026-01-31")),
+            None,
+            None,
+            date("2026-01-31"),
+        )
+        .unwrap();
         assert_eq!(due, Some(date("2026-02-28")));
     }
 
@@ -139,17 +149,28 @@ mod tests {
     #[test]
     fn weekday_skips_the_weekend() {
         // 2026-07-17 is a Friday; the next weekday is Monday the 20th.
-        let (due, _, _) =
-            compute_next_occurrence("every weekday", Some(date("2026-07-17")), None, None, date("2026-07-17"))
-                .unwrap();
+        let (due, _, _) = compute_next_occurrence(
+            "every weekday",
+            Some(date("2026-07-17")),
+            None,
+            None,
+            date("2026-07-17"),
+        )
+        .unwrap();
         assert_eq!(due, Some(date("2026-07-20")));
     }
 
     #[test]
     fn unrecognized_rule_is_none() {
         assert!(
-            compute_next_occurrence("every blue moon", Some(date("2026-07-19")), None, None, date("2026-07-19"))
-                .is_none()
+            compute_next_occurrence(
+                "every blue moon",
+                Some(date("2026-07-19")),
+                None,
+                None,
+                date("2026-07-19")
+            )
+            .is_none()
         );
     }
 }

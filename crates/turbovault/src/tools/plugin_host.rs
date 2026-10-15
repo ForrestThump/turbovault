@@ -197,9 +197,7 @@ impl VaultHost for PluginVaultHost {
         // read `.obsidian/**` (their settings live there); everything else stays
         // behind the note APIs.
         let normalized = relative_path.replace('\\', "/");
-        if normalized != ".obsidian"
-            && !normalized.starts_with(".obsidian/")
-        {
+        if normalized != ".obsidian" && !normalized.starts_with(".obsidian/") {
             return Err(PluginError::invalid_input(format!(
                 "read_config is scoped to `.obsidian/`; refused {relative_path:?}"
             )));

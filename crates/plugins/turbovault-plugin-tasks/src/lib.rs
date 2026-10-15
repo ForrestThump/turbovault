@@ -14,8 +14,8 @@
 //! | local name | kind | notes |
 //! |---|---|---|
 //! | `create`   | write | create a task line in a note (global-filter tag applied automatically) |
-//! | `list`     | read  | all/pending/completed, optional tag filter |
-//! | `overdue`  | read  | pending tasks past `due_date`, oldest first |
+//! | `list`     | read  | all/open/done/cancelled, optional tag filter. Open is todo and in progress |
+//! | `overdue`  | read  | open tasks past `due_date`, oldest first |
 //! | `tags`     | read  | distinct inline task tags across the vault |
 //! | `complete` | write | flip the checkbox + stamp `✅ <done>`; spawn the next occurrence of a recurring task (CAS) |
 //! | `update`   | write | edit arbitrary fields and re-render the line (CAS) |
@@ -46,7 +46,7 @@ use chrono::NaiveDate;
 use serde_json::{Value, json};
 use tokio::sync::OnceCell;
 use turbomcp_types::ToolInputSchema;
-use turbovault_core::{TaskItem, TaskPriority};
+use turbovault_core::{TaskItem, TaskPriority, TaskStatus};
 use turbovault_plugin_api::{
     Plugin, PluginContext, PluginDescriptor, PluginError, PluginProvider, PluginRequestContext,
     PluginResult, Tool, ToolResult, VaultApi, WriteNoteRequest, WritePrecondition, WriteProvenance,
@@ -56,10 +56,8 @@ use turbovault_plugin_api::{
 /// the write half of the task round trip (its read half is core's
 /// `parse_tasks`). `to_markdown_line` is also the seam a future recurrence-spawn
 /// on `complete` will build on.
-pub use config::TaskFormat;
+pub use config::{ConfigSource, TaskFormat, TasksConfig};
 pub use render::to_markdown_line;
-
-use config::TasksConfig;
 
 /// Compiled-in factory for the `tasks` module.
 pub struct TasksPlugin;
@@ -123,8 +121,8 @@ impl PluginProvider for TasksProvider {
                     "properties": {
                         "status": {
                             "type": "string",
-                            "description": "all | pending | completed (default all)",
-                            "enum": ["all", "pending", "open", "todo", "incomplete", "completed", "done"]
+                            "description": "all | pending | open | todo | incomplete | completed | done | cancelled (default all). Open filters are todo and in progress; they exclude cancelled.",
+                            "enum": ["all", "pending", "open", "todo", "incomplete", "completed", "done", "cancelled"]
                         },
                         "tags": {
                             "type": "array",
@@ -136,7 +134,7 @@ impl PluginProvider for TasksProvider {
             ),
             tool(
                 "overdue",
-                "List pending tasks whose due date is before today (or a given date), oldest first",
+                "List open tasks (todo or in progress) whose due date is before today (or a given date), oldest first. Cancelled tasks are excluded.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -239,8 +237,10 @@ impl TasksProvider {
     async fn config(&self) -> &TasksConfig {
         self.config
             .get_or_init(|| async {
-                if let Ok(Some(bytes)) =
-                    self.vault.read_config(config::OBSIDIAN_TASKS_DATA_PATH).await
+                if let Ok(Some(bytes)) = self
+                    .vault
+                    .read_config(config::OBSIDIAN_TASKS_DATA_PATH)
+                    .await
                     && let Some(resolved) = TasksConfig::from_obsidian_data(&bytes)
                 {
                     return resolved;
@@ -306,6 +306,7 @@ impl TasksProvider {
         let mut task = TaskItem {
             content,
             is_completed: false,
+            status: TaskStatus::Pending,
             position: Default::default(),
             created_date: None,
             scheduled_date: None,
@@ -326,18 +327,21 @@ impl TasksProvider {
         apply_edits(&mut task, args)?;
 
         // Always inject the global-filter tag — the agent never needs to pass it.
-        if let Some(filter) = &global_filter {
-            if let Some(tag) = filter.strip_prefix('#') {
-                let tag = tag.to_string();
-                if !task.tags.iter().any(|t| t.eq_ignore_ascii_case(&tag)) {
-                    task.tags.push(tag);
-                }
+        if let Some(filter) = &global_filter
+            && let Some(tag) = filter.strip_prefix('#')
+        {
+            let tag = tag.to_string();
+            if !task.tags.iter().any(|t| t.eq_ignore_ascii_case(&tag)) {
+                task.tags.push(tag);
             }
         }
 
         let separator = line_sep(&snapshot.content);
-        let mut lines: Vec<String> =
-            snapshot.content.split(separator).map(str::to_string).collect();
+        let mut lines: Vec<String> = snapshot
+            .content
+            .split(separator)
+            .map(str::to_string)
+            .collect();
 
         // Determine insertion line: after the specified line, after the last
         // existing task, or at end of note.
@@ -364,7 +368,8 @@ impl TasksProvider {
         };
 
         let new_line = format!(
-            "{indent}{marker} [ ] {}",
+            "{indent}{marker} [{}] {}",
+            task.status.marker(),
             render::render_body(&task, format)
         );
 
@@ -406,10 +411,9 @@ impl TasksProvider {
     /// Honors the resolved global filter, so results mirror what the user's
     /// Tasks plugin considers a task.
     async fn read_all_tasks(&self) -> PluginResult<Vec<(String, TaskItem)>> {
-        let global_filter = {
-            let config = self.config().await;
-            config.global_filter.clone()
-        };
+        // Clone before the vault awaits. Holding `&TasksConfig` from `self.config`
+        // across those awaits overlaps the provider borrow.
+        let config = self.config().await.clone();
 
         let notes = self.vault.list_notes().await?;
         let mut out = Vec::new();
@@ -423,23 +427,9 @@ impl TasksProvider {
                 continue;
             };
             for task in turbovault_parser::parse_tasks(&snapshot.content) {
-                if let Some(filter) = &global_filter {
-                    if let Some(tag) = filter.strip_prefix('#') {
-                        // A tag filter (the Obsidian default) matches on the tag
-                        // token, not a substring of the prose.
-                        let tag = tag.to_ascii_lowercase();
-                        if !task.tags.iter().any(|value| value.eq_ignore_ascii_case(&tag)) {
-                            continue;
-                        }
-                    } else {
-                        // A non-tag filter is a literal substring of the task text.
-                        let needle = filter.to_ascii_lowercase();
-                        if !task.content.to_ascii_lowercase().contains(&needle) {
-                            continue;
-                        }
-                    }
+                if config.accepts(&task) {
+                    out.push((path.clone(), task));
                 }
-                out.push((path.clone(), task));
             }
         }
         Ok(out)
@@ -464,11 +454,7 @@ impl TasksProvider {
 
         let mut tasks = Vec::new();
         for (path, task) in self.read_all_tasks().await? {
-            let passes_status = match status.as_str() {
-                "completed" | "done" => task.is_completed,
-                "pending" | "open" | "todo" | "incomplete" => !task.is_completed,
-                _ => true,
-            };
+            let passes_status = matches_status_filter(&status, &task);
             if !passes_status {
                 continue;
             }
@@ -499,7 +485,7 @@ impl TasksProvider {
 
         let mut overdue = Vec::new();
         for (path, task) in self.read_all_tasks().await? {
-            if task.is_completed {
+            if !task.status.is_open() {
                 continue;
             }
             if let Some(due) = task.due_date
@@ -554,7 +540,11 @@ impl TasksProvider {
         let task = task_at_line(&snapshot.content, line, path)?;
 
         let separator = line_sep(&snapshot.content);
-        let mut lines: Vec<String> = snapshot.content.split(separator).map(str::to_string).collect();
+        let mut lines: Vec<String> = snapshot
+            .content
+            .split(separator)
+            .map(str::to_string)
+            .collect();
         let idx = line - 1;
         if idx >= lines.len() {
             return Err(PluginError::invalid_input(format!(
@@ -582,6 +572,7 @@ impl TasksProvider {
         {
             let mut next = task.clone();
             next.is_completed = false;
+            next.status = TaskStatus::Pending;
             next.done_date = None;
             next.cancelled_date = None;
             next.due_date = next_due;
@@ -590,7 +581,10 @@ impl TasksProvider {
 
             let format = self.config().await.format;
             let (indent, marker) = split_list_prefix(&lines[idx]);
-            let rendered = format!("{indent}{marker} [ ] {}", render::render_body(&next, format));
+            let rendered = format!(
+                "{indent}{marker} [ ] {}",
+                render::render_body(&next, format)
+            );
             lines.insert(idx + 1, rendered.clone());
             next_occurrence = Some(rendered);
         }
@@ -635,8 +629,11 @@ impl TasksProvider {
 
         let format = self.config().await.format;
         let separator = line_sep(&snapshot.content);
-        let mut lines: Vec<String> =
-            snapshot.content.split(separator).map(str::to_string).collect();
+        let mut lines: Vec<String> = snapshot
+            .content
+            .split(separator)
+            .map(str::to_string)
+            .collect();
         let idx = line - 1;
         if idx >= lines.len() {
             return Err(PluginError::invalid_input(format!(
@@ -647,7 +644,7 @@ impl TasksProvider {
         // Preserve the original indentation and list marker; re-render only the
         // checkbox state and the description+metadata tail.
         let (indent, marker) = split_list_prefix(&lines[idx]);
-        let box_char = if task.is_completed { 'x' } else { ' ' };
+        let box_char = task.status.marker();
         let new_line = format!(
             "{indent}{marker} [{box_char}] {}",
             render::render_body(&task, format)
@@ -699,7 +696,11 @@ impl TasksProvider {
         let task = task_at_line(&snapshot.content, line, path)?;
 
         let separator = line_sep(&snapshot.content);
-        let mut lines: Vec<String> = snapshot.content.split(separator).map(str::to_string).collect();
+        let mut lines: Vec<String> = snapshot
+            .content
+            .split(separator)
+            .map(str::to_string)
+            .collect();
         let idx = line - 1;
         if idx >= lines.len() {
             return Err(PluginError::invalid_input(format!(
@@ -769,8 +770,9 @@ fn verify_version(args: &Value, actual: &str) -> PluginResult<()> {
 }
 
 fn parse_date(raw: &str, field: &str) -> PluginResult<NaiveDate> {
-    NaiveDate::parse_from_str(raw, "%Y-%m-%d")
-        .map_err(|_| PluginError::invalid_input(format!("invalid {field} {raw:?} — use YYYY-MM-DD")))
+    NaiveDate::parse_from_str(raw, "%Y-%m-%d").map_err(|_| {
+        PluginError::invalid_input(format!("invalid {field} {raw:?} — use YYYY-MM-DD"))
+    })
 }
 
 fn provenance(context: &PluginRequestContext, note: String) -> WriteProvenance {
@@ -783,7 +785,11 @@ fn provenance(context: &PluginRequestContext, note: String) -> WriteProvenance {
 
 /// `"\r\n"` if the note uses Windows line endings, else `"\n"`.
 fn line_sep(content: &str) -> &'static str {
-    if content.contains("\r\n") { "\r\n" } else { "\n" }
+    if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
 }
 
 /// Find the parsed task on `line` (1-based), erroring if none is there.
@@ -869,9 +875,17 @@ fn apply_edits(task: &mut TaskItem, args: &Value) -> PluginResult<()> {
             .to_string();
     }
     if let Some(value) = args.get("completed") {
-        task.is_completed = value
+        let completed = value
             .as_bool()
             .ok_or_else(|| PluginError::invalid_input("completed must be a boolean"))?;
+        task.is_completed = completed;
+        // Completing is Done. Clearing completion returns to todo, including
+        // from in-progress or cancelled.
+        task.status = if completed {
+            TaskStatus::Done
+        } else {
+            TaskStatus::Pending
+        };
     }
     if let Some(value) = args.get("priority") {
         let word = value
@@ -922,8 +936,11 @@ fn apply_edits(task: &mut TaskItem, args: &Value) -> PluginResult<()> {
             .into_iter()
             .map(|raw| raw.trim().trim_start_matches('#').to_ascii_lowercase())
             .collect();
-        task.tags
-            .retain(|tag| !removals.iter().any(|removal| removal.eq_ignore_ascii_case(tag)));
+        task.tags.retain(|tag| {
+            !removals
+                .iter()
+                .any(|removal| removal.eq_ignore_ascii_case(tag))
+        });
     }
 
     Ok(())
@@ -972,12 +989,24 @@ fn parse_priority_word(word: &str) -> PluginResult<TaskPriority> {
     })
 }
 
+/// `open` / `pending` / `todo` / `incomplete` are todo and in progress.
+/// Cancelled is its own filter. Unknown values, including `all`, match every status.
+fn matches_status_filter(status_filter: &str, task: &TaskItem) -> bool {
+    match status_filter {
+        "completed" | "done" => task.status == TaskStatus::Done,
+        "pending" | "open" | "todo" | "incomplete" => task.status.is_open(),
+        "cancelled" => task.status == TaskStatus::Cancelled,
+        _ => true,
+    }
+}
+
 fn task_json(path: &str, task: &TaskItem) -> Value {
     json!({
         "path": path,
         "line": task.position.line,
         "content": task.content,
         "is_completed": task.is_completed,
+        "status": task.status.as_str(),
         "priority": task.priority,
         "due_date": task.due_date.map(|date| date.to_string()),
         "scheduled_date": task.scheduled_date.map(|date| date.to_string()),
@@ -1007,9 +1036,11 @@ mod tests {
 
     #[test]
     fn completes_an_indented_task_and_preserves_metadata() {
-        let out =
-            mark_line_completed("    - [ ] pay rent 📅 2026-07-01", "2026-07-18".parse().unwrap())
-                .unwrap();
+        let out = mark_line_completed(
+            "    - [ ] pay rent 📅 2026-07-01",
+            "2026-07-18".parse().unwrap(),
+        )
+        .unwrap();
         assert_eq!(out, "    - [x] pay rent 📅 2026-07-01 ✅ 2026-07-18");
     }
 
@@ -1026,5 +1057,55 @@ mod tests {
     #[test]
     fn rejects_a_non_task_line() {
         assert!(mark_line_completed("just a paragraph", "2026-07-18".parse().unwrap()).is_err());
+    }
+
+    #[test]
+    fn status_filter_treats_cancelled_as_not_open() {
+        let note = "- [ ] todo item\n- [/] working\n- [-] dropped\n- [x] finished\n";
+        let tasks = turbovault_parser::parse_tasks(note);
+        assert_eq!(tasks.len(), 4);
+        let status_of = |content: &str| {
+            tasks
+                .iter()
+                .find(|task| task.content == content)
+                .unwrap_or_else(|| panic!("missing {content}"))
+                .status
+        };
+        assert_eq!(status_of("todo item"), TaskStatus::Pending);
+        assert_eq!(status_of("working"), TaskStatus::InProgress);
+        assert_eq!(status_of("dropped"), TaskStatus::Cancelled);
+        assert_eq!(status_of("finished"), TaskStatus::Done);
+
+        let contents = |filter: &str| -> Vec<&str> {
+            tasks
+                .iter()
+                .filter(|task| matches_status_filter(filter, task))
+                .map(|task| task.content.as_str())
+                .collect()
+        };
+        assert_eq!(contents("open"), ["todo item", "working"]);
+        assert_eq!(contents("pending"), ["todo item", "working"]);
+        assert_eq!(contents("todo"), ["todo item", "working"]);
+        assert_eq!(contents("incomplete"), ["todo item", "working"]);
+        assert_eq!(contents("cancelled"), ["dropped"]);
+        assert_eq!(contents("done"), ["finished"]);
+        assert_eq!(contents("completed"), ["finished"]);
+        assert_eq!(contents("all").len(), 4);
+    }
+
+    #[test]
+    fn completed_edit_keeps_status_consistent() {
+        let mut task = turbovault_parser::parse_tasks("- [/] working")
+            .into_iter()
+            .next()
+            .unwrap();
+        apply_edits(&mut task, &json!({"completed": true})).unwrap();
+        assert!(task.is_completed);
+        assert_eq!(task.status, TaskStatus::Done);
+
+        apply_edits(&mut task, &json!({"completed": false})).unwrap();
+        assert!(!task.is_completed);
+        assert_eq!(task.status, TaskStatus::Pending);
+        assert!(task.status.is_open());
     }
 }
