@@ -110,11 +110,12 @@ impl IndexBuilder {
                 continue;
             }
 
-            let mut chunk_id = self.chunks.allocate_chunk_ids(ranges.len() as u64)?;
+            let chunk_ids = self.chunks.allocate_chunk_ids(ranges.len() as u64)?..;
             let total_chunks = ranges.len() as u32;
             let mut chunk_batch: Vec<Chunk> = Vec::with_capacity(ranges.len());
 
-            for (chunk_index, (start, end)) in ranges.iter().enumerate() {
+            for (chunk_id, (chunk_index, (start, end))) in chunk_ids.zip(ranges.iter().enumerate())
+            {
                 let chunk_text_slice = &plain[*start..*end];
                 pending_texts.push(chunk_text_slice.to_string());
                 chunk_batch.push(Chunk {
@@ -127,7 +128,6 @@ impl IndexBuilder {
                     content_hash: sha256_hex(chunk_text_slice.as_bytes()),
                     preview: chunk_text_slice.chars().take(120).collect(),
                 });
-                chunk_id += 1;
             }
 
             pending.push((rel_path, mtime, file_hash, chunk_batch));

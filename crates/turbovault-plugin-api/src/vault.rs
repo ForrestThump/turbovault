@@ -71,6 +71,7 @@ pub struct WriteReceipt {
 ///
 /// The trait is public so plugin crates can provide small fakes in their own
 /// tests. Production implementations remain owned by the TurboVault host.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait VaultHost: Send + Sync {
     /// Return the active vault identity.
