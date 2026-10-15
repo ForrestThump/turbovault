@@ -113,6 +113,7 @@ pub struct PluginContext {
 }
 
 /// Object-safe MCP tool provider implemented by a plugin.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PluginProvider: Send + Sync {
     /// Return local, unprefixed tool descriptors.

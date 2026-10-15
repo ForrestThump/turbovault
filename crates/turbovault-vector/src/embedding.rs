@@ -10,6 +10,7 @@ use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 
 /// Common interface for embedding models.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait EmbeddingEngine: Send + Sync {
     async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, VectorError>;
@@ -90,6 +91,7 @@ impl EmbeddingEngine for FastembedEngine {
 
 /// Cross-encoder reranking of over-fetched candidates before the final truncation to `limit`.
 /// Reordering only — a reranker never adds or removes candidates from the recall set.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait Reranker: Send + Sync {
     /// Score each of `candidates` against `query`, returning scores in the SAME order as
