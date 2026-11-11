@@ -384,15 +384,15 @@ impl<'a> ParseEngine<'a> {
                 Event::TaskListMarker(_checked) if options.parse_tasks => {
                     in_task_item = true;
                     // Read raw marker byte to detect extended states [/] [-]
-                    task_builder.is_completed = {
-                        let raw_marker = self
-                            .content
-                            .as_bytes()
-                            .get(range.start + 1)
-                            .copied()
-                            .unwrap_or(b' ') as char;
-                        crate::models::TaskStatus::from_marker(raw_marker).is_completed()
-                    };
+                    let raw_marker = self
+                        .content
+                        .as_bytes()
+                        .get(range.start + 1)
+                        .copied()
+                        .unwrap_or(b' ') as char;
+                    let status = crate::models::TaskStatus::from_marker(raw_marker);
+                    task_builder.status = status;
+                    task_builder.is_completed = status.is_completed();
                     task_builder.position = SourcePosition::from_offset_indexed(
                         &self.index,
                         task_line_start_for_marker(self.content, &self.index, range.start),
@@ -723,10 +723,12 @@ impl<'a> ParseEngine<'a> {
                 .name("marker")
                 .and_then(|m| m.as_str().chars().next())
                 .unwrap_or(' ');
+            let status = crate::models::TaskStatus::from_marker(marker);
             let task_start = global_line_start + indent.len();
             let mut task_builder = TaskBuilder {
                 content: content.to_string(),
-                is_completed: crate::models::TaskStatus::from_marker(marker).is_completed(),
+                is_completed: status.is_completed(),
+                status,
                 position: SourcePosition::from_offset_indexed(
                     &self.index,
                     task_start,

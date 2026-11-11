@@ -134,6 +134,21 @@ mod tests {
     }
 
     #[test]
+    fn test_standard_markers_set_status() {
+        let tasks = parse_tasks("- [ ] Todo\n- [x] Done\n- [X] Also done");
+
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks[0].status, crate::TaskStatus::Pending);
+        assert!(tasks[0].status.is_open());
+        assert!(!tasks[0].is_completed);
+        assert_eq!(tasks[1].status, crate::TaskStatus::Done);
+        assert!(tasks[1].is_completed);
+        assert!(!tasks[1].status.is_open());
+        assert_eq!(tasks[2].status, crate::TaskStatus::Done);
+        assert!(tasks[2].is_completed);
+    }
+
+    #[test]
     fn test_extended_task_states() {
         let content = "- [/] In progress\n- [-] Cancelled";
         let tasks = parse_tasks(content);
@@ -141,8 +156,12 @@ mod tests {
         assert_eq!(tasks.len(), 2);
         assert_eq!(tasks[0].content, "In progress");
         assert!(!tasks[0].is_completed);
+        assert_eq!(tasks[0].status, crate::TaskStatus::InProgress);
+        assert!(tasks[0].status.is_open());
         assert_eq!(tasks[1].content, "Cancelled");
         assert!(!tasks[1].is_completed);
+        assert_eq!(tasks[1].status, crate::TaskStatus::Cancelled);
+        assert!(!tasks[1].status.is_open());
     }
 
     #[test]

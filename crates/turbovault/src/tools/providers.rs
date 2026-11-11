@@ -30,6 +30,13 @@ use turbomcp_server::CompositeHandler;
 use turbomcp_types::ResourceTemplate;
 use turbovault_core::prelude::MultiVaultManager;
 
+#[cfg(feature = "plugin-api")]
+use turbovault_plugin_api::{
+    HookBus, Plugin, PluginContext, PluginError, PluginErrorCode, PluginProvider,
+    PluginRequestContext, ToolResult as PluginToolResult, VaultApi, namespaced_tool_name,
+    validate_mcp_tool_name,
+};
+
 use self::analysis::AnalysisProvider;
 use self::audit::AuditProvider;
 use self::batch::BatchProvider;
@@ -46,6 +53,123 @@ use self::templates::TemplateProvider;
 use self::vault::VaultProvider;
 use super::CoreToolHandler;
 
+#[cfg(feature = "plugin-api")]
+#[derive(Clone)]
+struct PluginProviderAdapter {
+    descriptor: turbovault_plugin_api::PluginDescriptor,
+    provider: Arc<dyn PluginProvider>,
+    tools: Arc<Vec<Tool>>,
+}
+
+#[cfg(feature = "plugin-api")]
+impl PluginProviderAdapter {
+    fn new(
+        descriptor: turbovault_plugin_api::PluginDescriptor,
+        provider: Arc<dyn PluginProvider>,
+    ) -> Result<Self> {
+        let tools = provider.tools();
+        let mut names = std::collections::HashSet::new();
+        for tool in &tools {
+            validate_mcp_tool_name(&tool.name).map_err(|error| {
+                anyhow!(
+                    "plugin {:?} has an invalid local tool name: {error}",
+                    descriptor.id
+                )
+            })?;
+            if !names.insert(tool.name.clone()) {
+                return Err(anyhow!(
+                    "plugin {:?} advertises tool {:?} more than once",
+                    descriptor.id,
+                    tool.name
+                ));
+            }
+        }
+        Ok(Self {
+            descriptor,
+            provider,
+            tools: Arc::new(tools),
+        })
+    }
+}
+
+#[cfg(feature = "plugin-api")]
+fn plugin_error(error: PluginError) -> McpError {
+    match error.code {
+        PluginErrorCode::NotFound => McpError::resource_not_found(error.message),
+        PluginErrorCode::InvalidInput | PluginErrorCode::Conflict => {
+            McpError::invalid_request(error.message)
+        }
+        PluginErrorCode::Unavailable | PluginErrorCode::Internal => {
+            McpError::internal(error.message)
+        }
+    }
+}
+
+#[cfg(feature = "plugin-api")]
+#[allow(clippy::manual_async_fn)]
+impl McpHandler for PluginProviderAdapter {
+    fn server_info(&self) -> ServerInfo {
+        ServerInfo::new(&self.descriptor.name, &self.descriptor.version)
+    }
+
+    fn list_tools(&self) -> Vec<Tool> {
+        self.tools.as_ref().clone()
+    }
+
+    fn list_resources(&self) -> Vec<Resource> {
+        Vec::new()
+    }
+
+    fn list_prompts(&self) -> Vec<Prompt> {
+        Vec::new()
+    }
+
+    fn call_tool<'a>(
+        &'a self,
+        name: &'a str,
+        args: serde_json::Value,
+        ctx: &'a RequestContext,
+    ) -> impl std::future::Future<Output = McpResult<PluginToolResult>> + MaybeSend + 'a {
+        async move {
+            if !self.tools.iter().any(|tool| tool.name == name) {
+                return Err(McpError::tool_not_found(name));
+            }
+            let context = PluginRequestContext {
+                request_id: ctx.request_id.clone(),
+                user_id: ctx.user_id.clone(),
+                session_id: ctx.session_id.clone(),
+                client_id: ctx.client_id.clone(),
+                metadata: ctx
+                    .metadata
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            };
+            self.provider
+                .call_tool(name, args, context)
+                .await
+                .map_err(plugin_error)
+        }
+    }
+
+    fn read_resource<'a>(
+        &'a self,
+        uri: &'a str,
+        _ctx: &'a RequestContext,
+    ) -> impl std::future::Future<Output = McpResult<ResourceResult>> + MaybeSend + 'a {
+        async move { Err(McpError::resource_not_found(uri)) }
+    }
+
+    fn get_prompt<'a>(
+        &'a self,
+        name: &'a str,
+        _args: Option<serde_json::Value>,
+        _ctx: &'a RequestContext,
+    ) -> impl std::future::Future<Output = McpResult<PromptResult>> + MaybeSend + 'a {
+        async move { Err(McpError::prompt_not_found(name)) }
+    }
+}
+
 /// Obsidian MCP server with stable public names and focused internal providers.
 #[derive(Clone)]
 pub struct ObsidianMcpServer {
@@ -58,6 +182,10 @@ pub struct ObsidianMcpServer {
     tool_routes: Arc<HashMap<String, String>>,
     resource_routes: Arc<HashMap<String, String>>,
     prompt_routes: Arc<HashMap<String, String>>,
+    #[cfg(feature = "plugin-api")]
+    hooks: HookBus,
+    #[cfg(feature = "plugin-api")]
+    plugins: Arc<Vec<turbovault_plugin_api::PluginDescriptor>>,
 }
 
 impl ObsidianMcpServer {
@@ -68,6 +196,30 @@ impl ObsidianMcpServer {
     }
 
     fn from_core(core: CoreToolHandler) -> Result<Self> {
+        #[cfg(feature = "plugin-api")]
+        {
+            Self::assemble(core, Vec::new())
+        }
+        #[cfg(not(feature = "plugin-api"))]
+        {
+            Self::assemble(core)
+        }
+    }
+
+    /// Create a server with compiled-in plugin factories.
+    ///
+    /// Each plugin is mounted under its validated descriptor ID. This API is
+    /// available only with the default-off `plugin-api` Cargo feature.
+    #[cfg(feature = "plugin-api")]
+    pub fn new_with_plugins(plugins: Vec<Arc<dyn Plugin>>) -> Result<Self> {
+        let core = CoreToolHandler::new()?;
+        Self::assemble(core, plugins)
+    }
+
+    fn assemble(
+        core: CoreToolHandler,
+        #[cfg(feature = "plugin-api")] plugins: Vec<Arc<dyn Plugin>>,
+    ) -> Result<Self> {
         let mut composite = CompositeHandler::new("obsidian-vault", env!("CARGO_PKG_VERSION"));
         let mut tools = Vec::new();
         let mut resources = Vec::new();
@@ -141,6 +293,55 @@ impl ObsidianMcpServer {
         mount!(AnalysisProvider::new(core.clone()), "analysis");
         mount!(AuditProvider::new(core.clone()), "audit");
 
+        #[cfg(feature = "plugin-api")]
+        let (hooks, plugin_descriptors) = {
+            const DEFAULT_HOOK_CAPACITY: usize = 1_024;
+            let hooks = HookBus::new(DEFAULT_HOOK_CAPACITY);
+            let vault = VaultApi::new(super::plugin_host::vault_host(core.clone(), hooks.clone()));
+            let mut plugin_descriptors = Vec::new();
+
+            for plugin in plugins {
+                let descriptor = plugin.descriptor();
+                descriptor
+                    .validate()
+                    .map_err(|error| anyhow!("invalid plugin descriptor: {error}"))?;
+                let prefix = descriptor.id.clone();
+                let provider = plugin
+                    .build(PluginContext {
+                        vault: vault.clone(),
+                        hooks: hooks.clone(),
+                    })
+                    .map_err(|error| anyhow!("plugin {prefix:?} failed to build: {error}"))?;
+                let adapter = PluginProviderAdapter::new(descriptor.clone(), provider)?;
+
+                for mut tool in adapter.list_tools() {
+                    let local_name = tool.name.clone();
+                    let public_name =
+                        namespaced_tool_name(&prefix, &local_name).map_err(|error| {
+                            anyhow!(
+                                "plugin {prefix:?} tool {local_name:?} has an invalid public name: {error}"
+                            )
+                        })?;
+                    tool.name = public_name.clone();
+                    if tool_routes
+                        .insert(public_name.clone(), public_name.clone())
+                        .is_some()
+                    {
+                        return Err(anyhow!(
+                            "plugin tool {public_name:?} collides with an existing public tool"
+                        ));
+                    }
+                    tools.push(tool);
+                }
+
+                composite = composite
+                    .try_mount(adapter, &prefix)
+                    .map_err(|error| anyhow!("could not mount plugin {prefix:?}: {error}"))?;
+                plugin_descriptors.push(descriptor);
+            }
+            (hooks, plugin_descriptors)
+        };
+
         Ok(Self {
             core,
             composite,
@@ -151,7 +352,17 @@ impl ObsidianMcpServer {
             tool_routes: Arc::new(tool_routes),
             resource_routes: Arc::new(resource_routes),
             prompt_routes: Arc::new(prompt_routes),
+            #[cfg(feature = "plugin-api")]
+            hooks,
+            #[cfg(feature = "plugin-api")]
+            plugins: Arc::new(plugin_descriptors),
         })
+    }
+
+    /// Return the shared bounded hook bus.
+    #[cfg(feature = "plugin-api")]
+    pub fn hook_bus(&self) -> HookBus {
+        self.hooks.clone()
     }
 
     /// Initialize the persistent cache after server creation.
@@ -180,28 +391,10 @@ impl ObsidianMcpServer {
     }
 
     #[doc(hidden)]
-    pub async fn get_active_write_tools_test(&self) -> McpResult<turbovault_tools::WriteTools> {
-        self.core.get_active_write_tools_test().await
-    }
-
-    #[doc(hidden)]
     pub async fn get_active_vault_manager_test(
         &self,
     ) -> McpResult<Arc<turbovault_vault::VaultManager>> {
         self.core.get_active_vault_manager_test().await
-    }
-
-    #[doc(hidden)]
-    pub async fn get_reindex_queue_test(
-        &self,
-        vault_name: &str,
-    ) -> Option<Arc<turbovault_tools::ReindexQueue>> {
-        self.core.get_reindex_queue_test(vault_name).await
-    }
-
-    #[doc(hidden)]
-    pub async fn flush_reindex_for_active_vault_test(&self) -> McpResult<()> {
-        self.core.flush_reindex_for_active_vault_test().await
     }
 
     #[doc(hidden)]
@@ -213,27 +406,6 @@ impl ObsidianMcpServer {
         self.core
             .resolve_commit_message_test(message, fallback)
             .await
-    }
-
-    #[doc(hidden)]
-    pub async fn spawn_ref_listener_with_interval_test(
-        &self,
-        vault_name: &str,
-        interval: std::time::Duration,
-    ) {
-        self.core
-            .spawn_ref_listener_with_interval_test(vault_name, interval)
-            .await;
-    }
-
-    #[doc(hidden)]
-    pub async fn has_git_drainer_test(&self, vault_name: &str) -> bool {
-        self.core.has_git_drainer_test(vault_name).await
-    }
-
-    #[doc(hidden)]
-    pub async fn has_git_ref_listener_test(&self, vault_name: &str) -> bool {
-        self.core.has_git_ref_listener_test(vault_name).await
     }
 
     #[doc(hidden)]
@@ -282,7 +454,20 @@ impl Default for ObsidianMcpServer {
 #[allow(clippy::manual_async_fn)]
 impl McpHandler for ObsidianMcpServer {
     fn server_info(&self) -> ServerInfo {
-        ServerInfo::new("obsidian-vault", env!("CARGO_PKG_VERSION"))
+        let info = ServerInfo::new("obsidian-vault", env!("CARGO_PKG_VERSION"));
+        #[cfg(feature = "plugin-api")]
+        if !self.plugins.is_empty() {
+            let namespaces = self
+                .plugins
+                .iter()
+                .map(|plugin| plugin.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return info.with_description(format!(
+                "TurboVault with optional plugin namespaces: {namespaces}. Plugin tools use <plugin_id>_<local_tool>; use tools/list for the exact enabled catalog."
+            ));
+        }
+        info
     }
 
     fn server_capabilities(&self) -> ServerCapabilities {
@@ -360,6 +545,737 @@ mod tests {
             .expect("tool result should contain structured content")
     }
 
+    #[cfg(feature = "plugin-api")]
+    struct ContractPlugin;
+
+    #[cfg(feature = "plugin-api")]
+    impl Plugin for ContractPlugin {
+        fn descriptor(&self) -> turbovault_plugin_api::PluginDescriptor {
+            turbovault_plugin_api::PluginDescriptor {
+                id: "contract".to_string(),
+                name: "Contract Test Plugin".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Exercises the stable plugin boundary".to_string(),
+            }
+        }
+
+        fn build(
+            &self,
+            context: PluginContext,
+        ) -> turbovault_plugin_api::PluginResult<Arc<dyn PluginProvider>> {
+            Ok(Arc::new(ContractProvider {
+                vault: context.vault,
+            }))
+        }
+    }
+
+    #[cfg(feature = "plugin-api")]
+    struct OversizedNamespacePlugin;
+
+    #[cfg(feature = "plugin-api")]
+    impl Plugin for OversizedNamespacePlugin {
+        fn descriptor(&self) -> turbovault_plugin_api::PluginDescriptor {
+            turbovault_plugin_api::PluginDescriptor {
+                id: "p".repeat(turbovault_plugin_api::MCP_TOOL_NAME_MAX_LEN),
+                name: "Oversized Namespace".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Exercises final public-name validation".to_string(),
+            }
+        }
+
+        fn build(
+            &self,
+            context: PluginContext,
+        ) -> turbovault_plugin_api::PluginResult<Arc<dyn PluginProvider>> {
+            Ok(Arc::new(ContractProvider {
+                vault: context.vault,
+            }))
+        }
+    }
+
+    #[cfg(feature = "plugin-api")]
+    struct ContractProvider {
+        vault: VaultApi,
+    }
+
+    #[cfg(feature = "plugin-api")]
+    #[async_trait::async_trait]
+    impl PluginProvider for ContractProvider {
+        fn tools(&self) -> Vec<Tool> {
+            vec![Tool::new(
+                "round_trip",
+                "Create and read a note through VaultApi",
+            )]
+        }
+
+        async fn call_tool(
+            &self,
+            name: &str,
+            arguments: serde_json::Value,
+            context: PluginRequestContext,
+        ) -> turbovault_plugin_api::PluginResult<ToolResult> {
+            if name != "round_trip" {
+                return Err(PluginError::not_found(format!("unknown tool {name:?}")));
+            }
+            let path = arguments
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| PluginError::invalid_input("path is required"))?;
+            let content = arguments
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| PluginError::invalid_input("content is required"))?;
+            let precondition = arguments
+                .get("expected_version")
+                .and_then(serde_json::Value::as_str)
+                .map(|version| turbovault_plugin_api::WritePrecondition::Match(version.to_string()))
+                .unwrap_or(turbovault_plugin_api::WritePrecondition::CreateOnly);
+            let vault = self.vault.active_vault().await?;
+            let receipt = self
+                .vault
+                .write_note(turbovault_plugin_api::WriteNoteRequest {
+                    path: path.to_string(),
+                    content: content.to_string(),
+                    precondition,
+                    commit_message: Some(format!("contract plugin creates {path}")),
+                    provenance: Some(turbovault_plugin_api::WriteProvenance {
+                        source: "contract-test".to_string(),
+                        correlation_id: Some(context.request_id),
+                        note: None,
+                    }),
+                })
+                .await?;
+            let snapshot = self.vault.read_note(path).await?;
+            let notes = self.vault.list_notes().await?;
+            let config_content = match arguments
+                .get("config_path")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some(config_path) => self
+                    .vault
+                    .read_config(config_path)
+                    .await?
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+                None => None,
+            };
+            ToolResult::json(&serde_json::json!({
+                "vault": vault,
+                "receipt": receipt,
+                "snapshot": snapshot,
+                "notes": notes,
+                "config_content": config_content,
+            }))
+            .map_err(|error| PluginError::internal(error.to_string()))
+        }
+    }
+
+    #[cfg(feature = "plugin-api")]
+    #[tokio::test]
+    async fn plugin_tools_are_namespaced_and_use_the_curated_vault_api() {
+        use turbovault_core::VaultConfig;
+        use turbovault_plugin_api::{EventAttribution, HookEvent};
+
+        let temp = tempfile::TempDir::new().expect("temp vault");
+        // A config file in the vault's non-note space, to exercise the config
+        // capability (list_configs / read_config) alongside the note APIs.
+        let config_dir = temp
+            .path()
+            .join(".obsidian")
+            .join("plugins")
+            .join("example");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        std::fs::write(config_dir.join("data.json"), br#"{"k":"v"}"#).expect("write config");
+
+        let server = ObsidianMcpServer::new_with_plugins(vec![Arc::new(ContractPlugin)])
+            .expect("plugin composition");
+        let config = VaultConfig::builder("plugin-test", temp.path())
+            .build()
+            .expect("vault config");
+        server
+            .multi_vault()
+            .add_vault(config)
+            .await
+            .expect("register vault");
+        server
+            .multi_vault()
+            .set_active_vault("plugin-test")
+            .await
+            .expect("select vault");
+
+        let advertised = server.list_tools();
+        assert_eq!(advertised.len(), 75);
+        assert!(
+            advertised
+                .iter()
+                .any(|tool| tool.name == "contract_round_trip")
+        );
+        assert!(!advertised.iter().any(|tool| tool.name == "round_trip"));
+        let description = server
+            .server_info()
+            .description
+            .expect("enabled plugins should be described during MCP initialization");
+        assert!(description.contains("contract"));
+        assert!(description.contains("<plugin_id>_<local_tool>"));
+
+        let mut events = server.hook_bus().subscribe().expect("hook subscription");
+        let ctx = RequestContext::with_id("plugin-request");
+        let result = server
+            .call_tool(
+                "contract_round_trip",
+                serde_json::json!({
+                    "path": "plugin.md",
+                    "content": "# Plugin",
+                    "config_path": ".obsidian/plugins/example/data.json",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("namespaced plugin call");
+        let result = structured(result);
+        let initial_version = result["receipt"]["version"]
+            .as_str()
+            .expect("initial version")
+            .to_string();
+        assert_eq!(result["vault"]["name"], "plugin-test");
+        assert_eq!(result["snapshot"]["content"], "# Plugin");
+        assert_eq!(result["receipt"]["version"], result["snapshot"]["version"]);
+        assert_eq!(result["notes"], serde_json::json!(["plugin.md"]));
+        // Config space is name-addressed: a known `.obsidian/` path reads back,
+        // separately from the note APIs.
+        assert_eq!(result["config_content"], "{\"k\":\"v\"}");
+
+        let event = events.recv().await.expect("plugin write event");
+        assert_eq!(event.vault, "plugin-test");
+        assert_eq!(
+            event.event,
+            HookEvent::FileCreated {
+                path: "plugin.md".to_string()
+            }
+        );
+        assert!(matches!(
+            event.attribution,
+            EventAttribution::Attributed(turbovault_plugin_api::WriteProvenance {
+                source,
+                correlation_id: Some(id),
+                ..
+            }) if source == "contract-test" && id == "plugin-request"
+        ));
+
+        let error = server
+            .call_tool("round_trip", serde_json::json!({}), &ctx)
+            .await
+            .expect_err("unprefixed plugin tool must not be public");
+        assert_eq!(error.jsonrpc_code(), -32001);
+
+        let conflict = server
+            .call_tool(
+                "contract_round_trip",
+                serde_json::json!({"path": "plugin.md", "content": "# Overwrite"}),
+                &ctx,
+            )
+            .await
+            .expect_err("create-only write must refuse overwrites");
+        assert_eq!(conflict.jsonrpc_code(), -32600);
+
+        let updated = server
+            .call_tool(
+                "contract_round_trip",
+                serde_json::json!({
+                    "path": "plugin.md",
+                    "content": "# Updated",
+                    "expected_version": initial_version.clone(),
+                }),
+                &ctx,
+            )
+            .await
+            .expect("matching CAS write");
+        let updated = structured(updated);
+        assert_eq!(updated["snapshot"]["content"], "# Updated");
+        assert_ne!(updated["receipt"]["version"], result["receipt"]["version"]);
+        let modified = events.recv().await.expect("plugin update event");
+        assert!(matches!(
+            modified.event,
+            HookEvent::FileModified { ref path } if path == "plugin.md"
+        ));
+
+        let stale = server
+            .call_tool(
+                "contract_round_trip",
+                serde_json::json!({
+                    "path": "plugin.md",
+                    "content": "# Stale",
+                    "expected_version": initial_version,
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("stale CAS write must fail");
+        assert_eq!(stale.jsonrpc_code(), -32600);
+    }
+
+    #[cfg(feature = "tasks")]
+    #[tokio::test]
+    async fn tasks_module_serves_namespaced_tools_and_round_trips_through_the_vault_api() {
+        use turbovault_core::VaultConfig;
+
+        let temp = tempfile::TempDir::new().expect("temp vault");
+        let server = ObsidianMcpServer::new_with_plugins(vec![Arc::new(
+            turbovault_plugin_tasks::TasksPlugin,
+        )])
+        .expect("plugin composition");
+        let config = VaultConfig::builder("tasks-test", temp.path())
+            .build()
+            .expect("vault config");
+        server
+            .multi_vault()
+            .add_vault(config)
+            .await
+            .expect("register vault");
+        server
+            .multi_vault()
+            .set_active_vault("tasks-test")
+            .await
+            .expect("select vault");
+
+        // Catalog: the base 74 tools plus exactly the module's eight, advertised
+        // only under their namespaced ids — never the bare local names.
+        let advertised = server.list_tools();
+        assert_eq!(
+            advertised.len(),
+            82,
+            "tasks module must add exactly eight tools to the 74-tool base"
+        );
+        for name in [
+            "tasks_create",
+            "tasks_list",
+            "tasks_overdue",
+            "tasks_tags",
+            "tasks_complete",
+            "tasks_update",
+            "tasks_delete",
+            "tasks_config",
+        ] {
+            assert!(
+                advertised.iter().any(|tool| tool.name == name),
+                "missing namespaced tool {name}"
+            );
+        }
+        for bare in [
+            "create", "list", "overdue", "tags", "complete", "update", "delete", "config",
+        ] {
+            assert!(
+                !advertised.iter().any(|tool| tool.name == bare),
+                "unprefixed tool {bare} must not be public"
+            );
+        }
+
+        let ctx = RequestContext::with_id("tasks-request");
+
+        // Seed a small task list through the public core write tool so the read
+        // path has real content to parse.
+        let note = "# Tasks\n\n\
+             - [ ] buy milk #errand 📅 2026-07-01\n\
+             - [x] ship release #work ✅ 2026-07-10\n\
+             - [ ] write report #work 📅 2099-01-01\n";
+        server
+            .call_tool(
+                "write_note",
+                serde_json::json!({"path": "tasks.md", "content": note}),
+                &ctx,
+            )
+            .await
+            .expect("seed note");
+
+        // Read side: total, status filter, tag filter, overdue, distinct tags.
+        let all = structured(
+            server
+                .call_tool("tasks_list", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_list"),
+        );
+        assert_eq!(all["count"], 3);
+
+        let pending = structured(
+            server
+                .call_tool("tasks_list", serde_json::json!({"status": "pending"}), &ctx)
+                .await
+                .expect("tasks_list pending"),
+        );
+        assert_eq!(pending["count"], 2);
+
+        let work = structured(
+            server
+                .call_tool("tasks_list", serde_json::json!({"tags": ["work"]}), &ctx)
+                .await
+                .expect("tasks_list tag filter"),
+        );
+        assert_eq!(work["count"], 2);
+
+        let overdue = structured(
+            server
+                .call_tool(
+                    "tasks_overdue",
+                    serde_json::json!({"as_of": "2026-07-19"}),
+                    &ctx,
+                )
+                .await
+                .expect("tasks_overdue"),
+        );
+        assert_eq!(
+            overdue["count"], 1,
+            "only the past-due pending task is overdue (completed and future tasks excluded)"
+        );
+        assert_eq!(overdue["tasks"][0]["line"], 3);
+
+        let tags = structured(
+            server
+                .call_tool("tasks_tags", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_tags"),
+        );
+        assert_eq!(tags["tags"], serde_json::json!(["errand", "work"]));
+
+        // Write side: a stale compare-and-swap token is refused with a conflict.
+        let conflict = server
+            .call_tool(
+                "tasks_complete",
+                serde_json::json!({
+                    "path": "tasks.md",
+                    "line": 3,
+                    "expected_version": "not-the-version",
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("stale expected_version must be refused");
+        assert_eq!(conflict.jsonrpc_code(), -32600);
+
+        // A clean completion flips the checkbox and stamps the done date, and the
+        // change is durable and observable back through the read path.
+        let completed = structured(
+            server
+                .call_tool(
+                    "tasks_complete",
+                    serde_json::json!({
+                        "path": "tasks.md",
+                        "line": 3,
+                        "done_date": "2026-07-19",
+                    }),
+                    &ctx,
+                )
+                .await
+                .expect("tasks_complete"),
+        );
+        assert_eq!(
+            completed["completed_line"],
+            "- [x] buy milk #errand 📅 2026-07-01 ✅ 2026-07-19"
+        );
+
+        let after = structured(
+            server
+                .call_tool("tasks_list", serde_json::json!({"status": "pending"}), &ctx)
+                .await
+                .expect("tasks_list after complete"),
+        );
+        assert_eq!(after["count"], 1, "the completed task is no longer pending");
+
+        // Self-tuning: the temp vault has no `.obsidian/`, so config resolution
+        // falls back to the content heuristic, which sees the emoji signifiers
+        // in the seeded note and reports emoji format.
+        let config = structured(
+            server
+                .call_tool("tasks_config", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_config"),
+        );
+        assert_eq!(config["format"], "emoji");
+        assert_eq!(config["source"], "heuristic");
+        assert_eq!(config["global_filter"], serde_json::Value::Null);
+
+        // Update: edit a field and re-render the line in the detected dialect.
+        // Line 5 is "- [ ] write report #work 📅 2099-01-01"; raise its priority.
+        let updated = structured(
+            server
+                .call_tool(
+                    "tasks_update",
+                    serde_json::json!({"path": "tasks.md", "line": 5, "priority": "high"}),
+                    &ctx,
+                )
+                .await
+                .expect("tasks_update"),
+        );
+        assert_eq!(updated["format"], "emoji");
+        assert_eq!(
+            updated["line_text"], "- [ ] write report ⏫ 📅 2099-01-01 #work",
+            "priority emoji is inserted and the line is re-rendered canonically"
+        );
+
+        // add_tags edits the tag set incrementally (keeping existing tags).
+        let tagged = structured(
+            server
+                .call_tool(
+                    "tasks_update",
+                    serde_json::json!({"path": "tasks.md", "line": 5, "add_tags": ["urgent"]}),
+                    &ctx,
+                )
+                .await
+                .expect("tasks_update add_tags"),
+        );
+        assert_eq!(
+            tagged["line_text"],
+            "- [ ] write report ⏫ 📅 2099-01-01 #work #urgent"
+        );
+
+        // Recurrence: completing a recurring task spawns its next occurrence
+        // directly below, rendered in the detected dialect.
+        server
+            .call_tool(
+                "write_note",
+                serde_json::json!({
+                    "path": "recurring.md",
+                    "content": "# Recurring\n\n- [ ] water plants 🔁 every week 📅 2026-07-10\n",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("seed recurring note");
+        let recur = structured(
+            server
+                .call_tool(
+                    "tasks_complete",
+                    serde_json::json!({"path": "recurring.md", "line": 3, "done_date": "2026-07-12"}),
+                    &ctx,
+                )
+                .await
+                .expect("complete recurring"),
+        );
+        assert_eq!(recur["spawned_next_occurrence"], true);
+        assert_eq!(
+            recur["next_occurrence_line"], "- [ ] water plants 🔁 every week 📅 2026-07-17",
+            "the due date advances by one week and the line is re-rendered"
+        );
+    }
+
+    #[cfg(feature = "tasks")]
+    #[tokio::test]
+    async fn tasks_module_tunes_itself_to_obsidian_tasks_settings() {
+        use turbovault_core::VaultConfig;
+
+        let temp = tempfile::TempDir::new().expect("temp vault");
+        // A real Obsidian Tasks settings file in the vault's config dir — the
+        // authoritative source the module reads through `VaultApi::read_config`.
+        let data_dir = temp
+            .path()
+            .join(".obsidian")
+            .join("plugins")
+            .join("obsidian-tasks-plugin");
+        std::fs::create_dir_all(&data_dir).expect("config dir");
+        std::fs::write(
+            data_dir.join("data.json"),
+            br##"{ "taskFormat": "dataview", "globalFilter": "#task" }"##,
+        )
+        .expect("write data.json");
+
+        let server = ObsidianMcpServer::new_with_plugins(vec![Arc::new(
+            turbovault_plugin_tasks::TasksPlugin,
+        )])
+        .expect("plugin composition");
+        let config = VaultConfig::builder("tuned", temp.path())
+            .build()
+            .expect("vault config");
+        server
+            .multi_vault()
+            .add_vault(config)
+            .await
+            .expect("register vault");
+        server
+            .multi_vault()
+            .set_active_vault("tuned")
+            .await
+            .expect("select vault");
+
+        let ctx = RequestContext::with_id("tuned-request");
+
+        // The authoritative settings win: dataview format, global filter `#task`.
+        let cfg = structured(
+            server
+                .call_tool("tasks_config", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_config"),
+        );
+        assert_eq!(cfg["source"], "obsidian-data");
+        assert_eq!(cfg["format"], "dataview");
+        assert_eq!(cfg["global_filter"], "#task");
+
+        // One task carries the global filter, one does not (and mentions "task"
+        // only in prose — which must not match a tag filter).
+        let note = "# Tasks\n\n\
+             - [ ] write tests #task 📅 2026-08-01\n\
+             - [ ] this is not a task really\n";
+        server
+            .call_tool(
+                "write_note",
+                serde_json::json!({"path": "t.md", "content": note}),
+                &ctx,
+            )
+            .await
+            .expect("seed note");
+
+        let all = structured(
+            server
+                .call_tool("tasks_list", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_list"),
+        );
+        assert_eq!(
+            all["count"], 1,
+            "global filter keeps only #task-bearing tasks"
+        );
+
+        // Edits render in the configured dataview dialect, not emoji.
+        let updated = structured(
+            server
+                .call_tool(
+                    "tasks_update",
+                    serde_json::json!({"path": "t.md", "line": 3, "priority": "high"}),
+                    &ctx,
+                )
+                .await
+                .expect("tasks_update"),
+        );
+        assert_eq!(updated["format"], "dataview");
+        let line_text = updated["line_text"].as_str().expect("line_text");
+        assert!(line_text.contains("[priority:: high]"), "{line_text}");
+        assert!(line_text.contains("[due:: 2026-08-01]"), "{line_text}");
+        assert!(
+            !line_text.contains('📅') && !line_text.contains('⏫'),
+            "dialect must be dataview, not emoji: {line_text}"
+        );
+    }
+
+    /// Live test: exercise `read_config` (and the global filter it resolves)
+    /// end-to-end against a real Obsidian vault.
+    ///
+    /// Fails closed: it is ignored by default, gated on `TURBOVAULT_LIVE_VAULT`,
+    /// and skips (rather than fails) unless that vault actually has an Obsidian
+    /// Tasks `data.json` to validate against — so there is never a spurious
+    /// failure when there is nothing real to check, and no machine-specific path
+    /// or private content lives in the suite. Run with:
+    ///   TURBOVAULT_LIVE_VAULT="/path/to/vault" \
+    ///     cargo test -p turbovault --features tasks --lib live_tasks \
+    ///     -- --ignored --nocapture
+    #[cfg(feature = "tasks")]
+    #[tokio::test]
+    #[ignore = "live: set TURBOVAULT_LIVE_VAULT to a real Obsidian vault"]
+    async fn live_tasks_against_real_obsidian_vault() {
+        use turbovault_core::VaultConfig;
+
+        let Ok(vault_path) = std::env::var("TURBOVAULT_LIVE_VAULT") else {
+            eprintln!("SKIP: set TURBOVAULT_LIVE_VAULT to a real vault path");
+            return;
+        };
+        // No real Tasks settings to read => nothing to validate => skip, don't fail.
+        let data_json = std::path::Path::new(&vault_path)
+            .join(".obsidian/plugins/obsidian-tasks-plugin/data.json");
+        if !data_json.exists() {
+            eprintln!("SKIP: {vault_path} has no Obsidian Tasks data.json");
+            return;
+        }
+
+        let server = ObsidianMcpServer::new_with_plugins(vec![Arc::new(
+            turbovault_plugin_tasks::TasksPlugin,
+        )])
+        .expect("plugin composition");
+        let vault_config = VaultConfig::builder("live", &vault_path)
+            .build()
+            .expect("vault config");
+        server
+            .multi_vault()
+            .add_vault(vault_config)
+            .await
+            .expect("register vault");
+        server
+            .multi_vault()
+            .set_active_vault("live")
+            .await
+            .expect("select vault");
+
+        let ctx = RequestContext::with_id("live");
+
+        // 1. read_config: the module must resolve settings from the real file.
+        let resolved = structured(
+            server
+                .call_tool("tasks_config", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_config"),
+        );
+        eprintln!("\n--- tasks_config against {vault_path} ---\n{resolved:#}\n");
+        assert_eq!(
+            resolved["source"], "obsidian-data",
+            "read_config must read the vault's real Tasks data.json"
+        );
+
+        // 2. Global filter: report the count (informational — a vault whose tasks
+        //    are all tagged would legitimately show no reduction, so "the count
+        //    shrank" is NOT a sound criterion). The sound, content-independent
+        //    invariant is that every task the filter *returns* carries the filter
+        //    tag — unless the config strips it from the rendered tags.
+        let listed = structured(
+            server
+                .call_tool("tasks_list", serde_json::json!({}), &ctx)
+                .await
+                .expect("tasks_list"),
+        );
+        let count = listed["count"].as_u64().unwrap_or(0);
+        let global_filter = resolved["global_filter"].as_str().unwrap_or("");
+        eprintln!("tasks_list: {count} tasks match global filter {global_filter:?}");
+
+        let strips_tag = resolved["remove_global_filter"].as_bool().unwrap_or(false);
+        if let Some(tag) = global_filter.strip_prefix('#').filter(|_| !strips_tag) {
+            let tasks = listed["tasks"].as_array().cloned().unwrap_or_default();
+            for task in &tasks {
+                let carries_tag = task["tags"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .any(|value| value.eq_ignore_ascii_case(tag));
+                assert!(
+                    carries_tag,
+                    "a filtered task is missing the global-filter tag #{tag}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "plugin-api")]
+    #[test]
+    fn duplicate_plugin_namespaces_are_rejected_before_serving() {
+        let error = ObsidianMcpServer::new_with_plugins(vec![
+            Arc::new(ContractPlugin),
+            Arc::new(ContractPlugin),
+        ])
+        .err()
+        .expect("duplicate namespace must fail");
+        assert!(
+            error.to_string().contains("contract_round_trip")
+                || error.to_string().contains("duplicate prefix"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(feature = "plugin-api")]
+    #[test]
+    fn final_namespaced_tool_names_must_conform_to_mcp_sep_986() {
+        let error = ObsidianMcpServer::new_with_plugins(vec![Arc::new(OversizedNamespacePlugin)])
+            .err()
+            .expect("oversized public name must fail");
+        assert!(
+            error.to_string().contains("invalid public name"),
+            "unexpected error: {error}"
+        );
+    }
+
     #[test]
     fn tools_list_is_byte_for_byte_equivalent_to_the_pre_split_catalog() {
         let server = ObsidianMcpServer::new().expect("provider composition");
@@ -386,6 +1302,14 @@ mod tests {
             );
         }
         assert_eq!(server.tool_routes.len(), 74);
+        assert!(
+            server.server_info().description.is_none(),
+            "default server must not inject plugin guidance"
+        );
+        #[cfg(feature = "plugin-api")]
+        for tool in server.list_tools() {
+            validate_mcp_tool_name(&tool.name).expect("core tool name must conform to MCP SEP-986");
+        }
     }
 
     #[tokio::test]

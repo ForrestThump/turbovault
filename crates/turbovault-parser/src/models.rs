@@ -1,32 +1,9 @@
-use serde::{Deserialize, Serialize};
+//! Checkbox status.
+//!
+//! The enum lives in `turbovault-core` so [`turbovault_core::TaskItem`] can
+//! carry it. This re-export keeps `turbovault_parser::TaskStatus` stable.
 
-/// Obsidian task checkbox states
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TaskStatus {
-    /// `[ ]` — pending/incomplete
-    Pending,
-    /// `[x]` or `[X]` — completed/done
-    Done,
-    /// `[/]` — in progress
-    InProgress,
-    /// `[-]` — cancelled
-    Cancelled,
-}
-
-impl TaskStatus {
-    pub fn is_completed(&self) -> bool {
-        matches!(self, TaskStatus::Done)
-    }
-
-    pub fn from_marker(c: char) -> Self {
-        match c {
-            'x' | 'X' => TaskStatus::Done,
-            '/' => TaskStatus::InProgress,
-            '-' => TaskStatus::Cancelled,
-            _ => TaskStatus::Pending,
-        }
-    }
-}
+pub use turbovault_core::TaskStatus;
 
 #[cfg(test)]
 mod tests {
@@ -65,6 +42,14 @@ mod tests {
         assert!(!TaskStatus::Pending.is_completed());
         assert!(!TaskStatus::InProgress.is_completed());
         assert!(!TaskStatus::Cancelled.is_completed());
+    }
+
+    #[test]
+    fn test_is_open_excludes_done_and_cancelled() {
+        assert!(TaskStatus::Pending.is_open());
+        assert!(TaskStatus::InProgress.is_open());
+        assert!(!TaskStatus::Done.is_open());
+        assert!(!TaskStatus::Cancelled.is_open());
     }
 
     #[test]
