@@ -2,15 +2,16 @@
 //! module (prototype).
 //!
 //! Wraps the embedded `turbovault-vector` engine (fastembed + usearch + SQLite)
-//! behind the plugin boundary: the index persists in the plugin's per-vault state
-//! dir ([`VaultApi::plugin_state_dir`]), notes are read through [`VaultApi`], and
-//! the index is kept current by an mtime reconcile ([`VaultApi::list_notes_meta`]
-//! → `update_note`). Local tool names are advertised namespaced as `vector_*`.
+//! behind the plugin boundary: notes are read through [`VaultApi`], the index
+//! persists in a per-vault directory under the process state dir, and the index
+//! is kept current by comparing each note's version token from
+//! [`VaultApi::read_note`]. Local tool names are advertised namespaced as `vector_*`.
 //!
 //! Prototype scope: reconcile-on-demand (before search / on reindex) rather than
 //! a real-time hook-subscription task; single active vault; default config.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -61,8 +62,43 @@ struct Engine {
 pub struct VectorProvider {
     vault: VaultApi,
     engine: OnceCell<Engine>,
-    /// Last-seen mtime per note path — the module's own reconcile cursor.
-    seen: Mutex<HashMap<String, i64>>,
+    /// Last-seen version token per note path — the module's own reconcile cursor.
+    seen: Mutex<HashMap<String, String>>,
+}
+
+fn sanitize_path_component(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "vault".to_string()
+    } else {
+        sanitized
+    }
+}
+
+/// Per-vault index directory. The host API does not expose a vault filesystem
+/// path, so the index lives under `$XDG_STATE_HOME/turbovault/plugins/vector/<vault>`
+/// (or `~/.local/state/...` when `XDG_STATE_HOME` is unset).
+fn vector_state_dir(vault_name: &str) -> PathBuf {
+    let base = match std::env::var_os("XDG_STATE_HOME") {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => match std::env::var_os("HOME") {
+            Some(home) if !home.is_empty() => PathBuf::from(home).join(".local").join("state"),
+            _ => std::env::temp_dir(),
+        },
+    };
+    base.join("turbovault")
+        .join("plugins")
+        .join("vector")
+        .join(sanitize_path_component(vault_name))
 }
 
 fn verr(error: VectorError) -> PluginError {
@@ -70,10 +106,22 @@ fn verr(error: VectorError) -> PluginError {
 }
 
 impl VectorProvider {
+    async fn state_dir(&self) -> PluginResult<PathBuf> {
+        let vault = self.vault.active_vault().await?;
+        let state_dir = vector_state_dir(&vault.name);
+        std::fs::create_dir_all(&state_dir).map_err(|error| {
+            PluginError::internal(format!(
+                "failed to create vector state dir {}: {error}",
+                state_dir.display()
+            ))
+        })?;
+        Ok(state_dir)
+    }
+
     async fn engine(&self) -> PluginResult<&Engine> {
         self.engine
             .get_or_try_init(|| async {
-                let state_dir = self.vault.plugin_state_dir().await?;
+                let state_dir = self.state_dir().await?;
                 let config = VectorConfig::default();
                 let cache = config.model_cache_dir.clone();
 
@@ -123,42 +171,44 @@ impl VectorProvider {
             .await
     }
 
-    /// Pull-based reconcile: re-embed notes whose mtime moved since we last saw
-    /// them, and drop notes that vanished. `update_note` skips unchanged content
-    /// at chunk granularity, so this only re-embeds what actually changed.
+    /// Pull-based reconcile: re-embed notes whose version token moved since we
+    /// last saw them, and drop notes that vanished. `update_note` skips unchanged
+    /// content at chunk granularity, so this only re-embeds what actually changed.
+    /// The host API has no mtime, so the stored file mtime is `0`.
     async fn reconcile(&self) -> PluginResult<usize> {
         let engine = self.engine().await?;
-        let current: HashMap<String, i64> = self
+        let current_paths: Vec<String> = self
             .vault
-            .list_notes_meta()
+            .list_notes()
             .await?
             .into_iter()
-            .filter(|(path, _)| path.ends_with(".md"))
+            .filter(|path| path.ends_with(".md"))
             .collect();
+        let current_set: HashSet<String> = current_paths.iter().cloned().collect();
 
         let mut seen = self.seen.lock().await;
         let mut idx = engine.index.write().await;
         let mut changed = 0usize;
 
-        for (path, mtime) in &current {
-            if seen.get(path) == Some(mtime) {
-                continue;
-            }
-            let Ok(snapshot) = self.vault.read_note(path).await else {
+        for path in current_paths {
+            let Ok(snapshot) = self.vault.read_note(&path).await else {
                 continue;
             };
+            if seen.get(&path) == Some(&snapshot.version) {
+                continue;
+            }
             engine
                 .builder
-                .update_note(path, &snapshot.content, *mtime, &mut idx)
+                .update_note(&path, &snapshot.content, 0, &mut idx)
                 .await
                 .map_err(verr)?;
-            seen.insert(path.clone(), *mtime);
+            seen.insert(path, snapshot.version);
             changed += 1;
         }
 
         let gone: Vec<String> = seen
             .keys()
-            .filter(|path| !current.contains_key(*path))
+            .filter(|path| !current_set.contains(*path))
             .cloned()
             .collect();
         for path in gone {

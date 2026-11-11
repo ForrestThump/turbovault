@@ -17,13 +17,12 @@ Tools (advertised namespaced under `vector`):
 | `vector_status`  | model, dimensions, indexed-note count, chunking |
 | `vector_config`  | resolved configuration + source |
 
-The index persists in the plugin's per-vault state dir
-(`.turbovault/plugins/vector/`, via `VaultApi::plugin_state_dir`). Notes are read
-through `VaultApi`; the index is kept current by an mtime reconcile
-(`VaultApi::list_notes_meta` → `update_note`), which re-embeds only changed
-chunks.
+The index persists in a per-vault directory under
+`$XDG_STATE_HOME/turbovault/plugins/vector/<vault>` (`~/.local/state/...` when
+`XDG_STATE_HOME` is unset). Notes are read through `VaultApi`; the index is kept
+current by comparing each note's version token from `read_note` and calling
+`update_note`, which re-embeds only changed chunks.
 
 **Prototype scope:** reconcile-on-demand (before search / on reindex) rather than
-a real-time hook-subscription task; single active vault; default config. Depends
-on the proposed `plugin_state_dir` (#42) and `list_notes_meta`/change-feed (#43)
-capabilities.
+a real-time hook-subscription task; single active vault; default config. The host
+API does not yet expose a vault-local state directory or note mtimes.
