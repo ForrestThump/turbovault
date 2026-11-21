@@ -115,7 +115,7 @@ parser (see `datetime::iso_date`), so their JSON accepts exactly what
 | Offset without a colon (`+0000`), hour-only offset (`+00`), offset with a seconds field (`+00:00:00`) | rejected | rejected as well — `jiff` accepts them, so the shape is checked before parsing |
 | Time without a seconds field (`2025-11-20T21:35Z`) | rejected | rejected as well — `jiff` accepts them |
 | Year outside `0000`..=`9999` | rendered as a signed five digit year (`-0001-01-01T00:00:00Z`) | rendered as a signed six digit year (`-000001-01-01T00:00:00Z`) |
-| Range of representable instants | roughly `-262144`..=`262144` years | `jiff`'s `Timestamp` range, roughly `-009999-01-02`..`9999-12-30` |
+| Range of representable instants | roughly `-262144`..`262142` years | `jiff`'s `Timestamp` range, roughly `-009999-01-02`..`9999-12-30` |
 | Whitespace before a numeric date field (`2026-01- 1`) | skipped, so accepted | rejected — the month and the day must be one or two digits |
 
 The **supported range** of the timestamp helpers is the RFC 3339 year range,
@@ -159,8 +159,8 @@ Two edge cases of the recurrence arithmetic changed:
   seconds), rejection of non-RFC-3339 input, lenient ISO date parsing, and the
   serde adapter. Later rounds added: the pre-epoch sub-second normalization
   (`1969-12-31T23:59:59.500Z`), the tightened month/day field widths, the
-  signed year, the leap second, the over-long fraction, the offset spellings
-  `jiff` accepts, and the RFC 3339 year range.
+  signed year, the leap second, the over-long fraction, the offset and time
+  shapes `chrono` rejected, and the RFC 3339 year range.
 * `turbovault-core::models`: a `TaskItem` JSON round-trip with the unpadded
   and signed date spellings `chrono` accepted, the zero padded spelling on
   the way out, and the rejection of a spelling `chrono` rejected.
