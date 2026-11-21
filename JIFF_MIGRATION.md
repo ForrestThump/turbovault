@@ -178,13 +178,17 @@ Two edge cases of the recurrence arithmetic changed:
 
 ## `chrono` still in the dependency tree
 
+No crate in this workspace depends on `chrono` directly any more, but **`chrono`
+is still compiled into this repository's binaries** through third-party crates.
 `cargo tree -i chrono --workspace --all-features -e normal,build,dev --target all`
-after this migration reports `chrono` only through third-party crates:
+reports `chrono` only through the paths below:
 
 | Path | Note |
 |---|---|
-| `turbomcp-core 3.1.5` → `chrono` | The crates.io `turbomcp` release enables `chrono` through its `rich-errors` feature. A separate PR migrates the `turbomcp` fork; no `[patch]` is added here. |
-| `gluesql-core 0.19.0` → `chrono` | Pulled in by `gluesql`, which `turbovault-sql` uses for the optional `sql` feature (`turbovault-tools` → `turbovault`). Upstream dependency, not replaced here. |
+| `turbomcp-core 3.1.5` → `chrono` | The crates.io `turbomcp` release enables `chrono` through its `rich-errors` feature, so `chrono` is compiled into every binary that links TurboMCP. A separate PR migrates the `turbomcp` fork; no `[patch]` is added here. |
+| `gluesql-core 0.19.0` → `chrono` | Pulled in by `gluesql`, which `turbovault-sql` uses for the optional `sql` feature (`turbovault-tools` → `turbovault`). With that feature enabled `chrono` is compiled into the binary; it is an upstream dependency and is not replaced here. |
 | `schemars 1.2.1` → `chrono` | `schemars` keeps an optional `chrono04` dependency, and the crates.io `turbomcp 3.1.5` release activates that feature. This workspace does **not** enable it — it enables `schemars`' `jiff02` feature instead, so `jiff` types get their JSON schema impls. |
 
-No crate in this workspace depends on `chrono` directly any more.
+So for this repository on its own, `chrono` is still in the compiled dependency
+tree — through `turbomcp` and, with the `sql` feature, through `gluesql` — even
+though no TurboVault crate uses it any more.
