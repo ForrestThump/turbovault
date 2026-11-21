@@ -15,7 +15,6 @@ turbovault-core = { workspace = true }
 
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-jiff = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
