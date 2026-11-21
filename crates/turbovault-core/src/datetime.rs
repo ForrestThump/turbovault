@@ -22,8 +22,10 @@
 //! ([`jiff::Timestamp`] for instants, [`jiff::civil::Date`] for calendar
 //! dates).
 
-use jiff::Timestamp;
+use std::borrow::Cow;
+
 use jiff::civil::Date;
+use jiff::{SignedDuration, Timestamp};
 
 /// Format a timestamp the way chrono's `DateTime<Utc>` serde impl did.
 ///
@@ -83,9 +85,76 @@ pub fn format_now() -> String {
 ///
 /// Accepts everything chrono's `DateTime::parse_from_rfc3339` accepted: a `Z`
 /// suffix or a numeric UTC offset (`+00:00`, `-05:00`), with or without
-/// fractional seconds.
+/// fractional seconds, a leap second (`:60`, mapped to the following second)
+/// and a fraction with more than nanosecond precision (truncated).
+///
+/// `jiff` additionally accepts offset spellings chrono rejected (an offset
+/// without a colon such as `+0000`, an hour-only offset such as `+00`, and an
+/// offset with a seconds field such as `+00:00:00`); see `JIFF_MIGRATION.md`.
 pub fn parse_timestamp(raw: &str) -> Result<Timestamp, jiff::Error> {
-    raw.parse()
+    let (text, leap_second) = normalize_for_chrono(raw);
+    let timestamp = text.parse::<Timestamp>()?;
+    if leap_second {
+        // A leap second is the instant right after `23:59:59`, i.e. the
+        // following second — chrono treated it the same way.
+        return timestamp.checked_add(SignedDuration::from_secs(1));
+    }
+    Ok(timestamp)
+}
+
+/// Rewrite an RFC 3339 timestamp so that `jiff` parses it the way `chrono`
+/// did.
+///
+/// * A leap second (`:60`) becomes the following second: chrono treated
+///   `23:59:60` as the instant right after `23:59:59`, while `jiff` truncates
+///   it to `23:59:59`.
+/// * A fraction longer than nanosecond precision is truncated instead of
+///   being rejected.
+///
+/// Returns the rewritten text and whether a leap second was seen.
+fn normalize_for_chrono(raw: &str) -> (Cow<'_, str>, bool) {
+    let Some(separator) = raw.find(['T', 't']) else {
+        return (Cow::Borrowed(raw), false);
+    };
+    // The time part is `HH:MM:SS`, so the seconds field starts six
+    // characters after the date/time separator.
+    let time_start = separator + 1;
+    let seconds_start = time_start + 6;
+    let Some(seconds) = raw.get(seconds_start..seconds_start + 2) else {
+        return (Cow::Borrowed(raw), false);
+    };
+    let leap_second = seconds == "60";
+
+    // The fraction, when present, follows the seconds field.
+    let fraction_start = seconds_start + 2;
+    let digits_start = fraction_start + 1;
+    let mut digits_end = digits_start;
+    if raw.as_bytes().get(fraction_start) == Some(&b'.') {
+        while raw
+            .as_bytes()
+            .get(digits_end)
+            .is_some_and(u8::is_ascii_digit)
+        {
+            digits_end += 1;
+        }
+    }
+    let long_fraction = digits_end > digits_start && digits_end - digits_start > 9;
+
+    if !leap_second && !long_fraction {
+        return (Cow::Borrowed(raw), false);
+    }
+
+    let mut text = String::with_capacity(raw.len());
+    text.push_str(&raw[..seconds_start]);
+    text.push_str(if leap_second { "59" } else { seconds });
+    if long_fraction {
+        text.push('.');
+        text.push_str(&raw[digits_start..digits_start + 9]);
+        text.push_str(&raw[digits_end..]);
+    } else {
+        text.push_str(&raw[fraction_start..]);
+    }
+    (Cow::Owned(text), leap_second)
 }
 
 /// Parse an ISO `YYYY-MM-DD` calendar date.
@@ -389,6 +458,62 @@ mod tests {
         assert_eq!(
             parse_timestamp("2025-11-20T21:35:03Z").unwrap(),
             timestamp(0)
+        );
+    }
+
+    #[test]
+    fn parses_leap_seconds_like_chrono_did() {
+        // chrono treated `23:59:60` as the instant right after `23:59:59`,
+        // i.e. the following second.
+        let leap = parse_timestamp("2016-12-31T23:59:60Z").unwrap();
+        assert_eq!(leap, parse_timestamp("2017-01-01T00:00:00Z").unwrap());
+        assert_eq!(format_timestamp(leap), "2017-01-01T00:00:00Z");
+
+        // The same with an explicit offset.
+        assert_eq!(
+            parse_timestamp("2016-12-31T23:59:60+00:00").unwrap(),
+            parse_timestamp("2017-01-01T00:00:00Z").unwrap()
+        );
+        assert_eq!(
+            parse_timestamp("1998-12-31T23:59:60Z").unwrap(),
+            parse_timestamp("1999-01-01T00:00:00Z").unwrap()
+        );
+    }
+
+    #[test]
+    fn truncates_a_fraction_longer_than_nanosecond_precision() {
+        // chrono truncated the fraction to nanosecond precision and accepted
+        // the rest of the string; jiff rejects it.
+        let truncated = parse_timestamp("2025-11-20T21:35:03.1234567890Z").unwrap();
+        assert_eq!(
+            truncated,
+            parse_timestamp("2025-11-20T21:35:03.123456789Z").unwrap()
+        );
+        assert_eq!(
+            format_timestamp(truncated),
+            "2025-11-20T21:35:03.123456789Z"
+        );
+
+        let truncated = parse_timestamp("2025-11-20T21:35:03.123456789012+02:00").unwrap();
+        assert_eq!(
+            truncated,
+            parse_timestamp("2025-11-20T21:35:03.123456789+02:00").unwrap()
+        );
+    }
+
+    #[test]
+    fn accepts_the_offset_forms_jiff_supports() {
+        // chrono rejected these offset spellings, jiff accepts them. We keep
+        // jiff's larger set; see JIFF_MIGRATION.md.
+        let expected = parse_timestamp("2025-11-20T21:35:03Z").unwrap();
+        assert_eq!(
+            parse_timestamp("2025-11-20T21:35:03+0000").unwrap(),
+            expected
+        );
+        assert_eq!(parse_timestamp("2025-11-20T21:35:03+00").unwrap(), expected);
+        assert_eq!(
+            parse_timestamp("2025-11-20T21:35:03+00:00:00").unwrap(),
+            expected
         );
     }
 
