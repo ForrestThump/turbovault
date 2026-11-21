@@ -110,7 +110,8 @@ parser (see `datetime::iso_date`), so their JSON accepts exactly what
 | Leap second (`:60`) | accepted; the parsed value is the instant right after `23:59:59` | same: accepted, and mapped to the following second (`2016-12-31T23:59:60Z` → `2017-01-01T00:00:00Z`) |
 | Leap second, *rendered* | kept the `23:59:60` spelling | `jiff`'s `Timestamp` cannot hold a leap second, so the equivalent instant is rendered (`2017-01-01T00:00:00Z`) |
 | Fraction with more than 9 digits | truncated to nanosecond precision | same: truncated to nanosecond precision |
-| Offset without a colon (`+0000`), hour-only offset (`+00`), offset with a seconds field (`+00:00:00`) | rejected | accepted (`jiff`'s larger set) |
+| Offset without a colon (`+0000`), hour-only offset (`+00`), offset with a seconds field (`+00:00:00`) | rejected | rejected as well — `jiff` accepts them, so the shape is checked before parsing |
+| Time without a seconds field (`2025-11-20T21:35Z`) | rejected | rejected as well — `jiff` accepts them |
 | Year outside `0000`..=`9999` | rendered as a signed five digit year (`-0001-01-01T00:00:00Z`) | rendered as a signed six digit year (`-000001-01-01T00:00:00Z`) |
 | Range of representable instants | roughly `-262144`..=`262144` years | `jiff`'s `Timestamp` range, roughly `-009999-01-02`..`9999-12-30` |
 | Whitespace before a numeric date field (`2026-01- 1`) | skipped, so accepted | rejected — the month and the day must be one or two digits |

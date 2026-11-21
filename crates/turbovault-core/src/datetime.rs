@@ -89,18 +89,23 @@ pub fn format_now() -> String {
 /// Parse an RFC 3339 timestamp.
 ///
 /// Accepts everything chrono's `DateTime::parse_from_rfc3339` accepted: a `Z`
-/// suffix or a numeric UTC offset (`+00:00`, `-05:00`), with or without
-/// fractional seconds, a leap second (`:60`, mapped to the following second)
-/// and a fraction with more than nanosecond precision (truncated).
-///
-/// `jiff` additionally accepts offset spellings chrono rejected (an offset
-/// without a colon such as `+0000`, an hour-only offset such as `+00`, and an
-/// offset with a seconds field such as `+00:00:00`); see `JIFF_MIGRATION.md`.
+/// (or `z`) suffix or a `±HH:MM` UTC offset, with or without fractional
+/// seconds, a leap second (`:60`, mapped to the following second) and a
+/// fraction with more than nanosecond precision (truncated). Offset spellings
+/// chrono rejected (an offset without a colon such as `+0000`, an hour-only
+/// offset such as `+00`, and an offset with a seconds field such as
+/// `+00:00:00`) are rejected here as well.
 ///
 /// The supported range is the RFC 3339 year range, `0000`..=`9999`; `jiff`'s
 /// own `Timestamp` range reaches further (`-009999-01-02`..`9999-12-30`), and
 /// chrono reached further still.
 pub fn parse_timestamp(raw: &str) -> Result<Timestamp, jiff::Error> {
+    if !has_chrono_compatible_shape(raw) {
+        return Err(jiff::Error::from_args(format_args!(
+            "not an RFC 3339 timestamp chrono accepted: {raw:?} — expected \
+             `YYYY-MM-DDTHH:MM:SS` with a `Z` or `±HH:MM` offset"
+        )));
+    }
     let (text, leap_second) = normalize_for_chrono(raw);
     let timestamp = text.parse::<Timestamp>()?;
     if leap_second {
@@ -109,6 +114,62 @@ pub fn parse_timestamp(raw: &str) -> Result<Timestamp, jiff::Error> {
         return timestamp.checked_add(SignedDuration::from_secs(1));
     }
     Ok(timestamp)
+}
+
+/// Check that a timestamp has the shape chrono's RFC 3339 parser required: a
+/// `HH:MM:SS` time part and a `Z` (or `z`) suffix or a `±HH:MM` offset.
+fn has_chrono_compatible_shape(raw: &str) -> bool {
+    has_seconds_field(raw) && has_chrono_compatible_offset(raw)
+}
+
+/// Check that the time part of a timestamp carries a seconds field, which
+/// chrono required: `2025-11-20T21:35Z` was rejected.
+fn has_seconds_field(raw: &str) -> bool {
+    let Some(separator) = separator_index(raw) else {
+        return false;
+    };
+    let bytes = raw.as_bytes();
+    let start = separator + 1;
+    let end = start + 8;
+    if bytes.len() < end {
+        return false;
+    }
+    let time = &bytes[start..end];
+    time[0].is_ascii_digit()
+        && time[1].is_ascii_digit()
+        && time[2] == b':'
+        && time[3].is_ascii_digit()
+        && time[4].is_ascii_digit()
+        && time[5] == b':'
+        && time[6].is_ascii_digit()
+        && time[7].is_ascii_digit()
+}
+
+/// Index of the date/time separator of an RFC 3339 timestamp.
+fn separator_index(raw: &str) -> Option<usize> {
+    raw.char_indices()
+        .find(|(index, c)| *index > 0 && matches!(c, 'T' | 't' | ' '))
+        .map(|(index, _)| index)
+}
+
+/// Check that a timestamp carries an RFC 3339 offset chrono accepted: a `Z`
+/// (or `z`) suffix, or a `±HH:MM` offset with a colon and two digits on each
+/// side.
+fn has_chrono_compatible_offset(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    match bytes.last() {
+        Some(b'Z' | b'z') => true,
+        Some(_) => {
+            bytes.len() >= 6
+                && matches!(bytes[bytes.len() - 6], b'+' | b'-')
+                && bytes[bytes.len() - 3] == b':'
+                && bytes[bytes.len() - 5].is_ascii_digit()
+                && bytes[bytes.len() - 4].is_ascii_digit()
+                && bytes[bytes.len() - 2].is_ascii_digit()
+                && bytes[bytes.len() - 1].is_ascii_digit()
+        }
+        None => false,
+    }
 }
 
 /// Rewrite an RFC 3339 timestamp so that `jiff` parses it the way `chrono`
@@ -122,7 +183,7 @@ pub fn parse_timestamp(raw: &str) -> Result<Timestamp, jiff::Error> {
 ///
 /// Returns the rewritten text and whether a leap second was seen.
 fn normalize_for_chrono(raw: &str) -> (Cow<'_, str>, bool) {
-    let Some(separator) = raw.find(['T', 't']) else {
+    let Some(separator) = separator_index(raw) else {
         return (Cow::Borrowed(raw), false);
     };
     // The time part is `HH:MM:SS`, so the seconds field starts six
@@ -415,6 +476,26 @@ mod tests {
             format_timestamp(whole_second_before_epoch),
             "1969-12-31T23:59:59Z"
         );
+
+        // -1.5 seconds after the epoch.
+        let one_and_a_half_seconds_before_epoch = Timestamp::from_second(-1)
+            .unwrap()
+            .checked_add(SignedDuration::from_nanos(-500_000_000))
+            .unwrap();
+        assert_eq!(
+            format_timestamp(one_and_a_half_seconds_before_epoch),
+            "1969-12-31T23:59:58.500Z"
+        );
+
+        // -999999.876543211 seconds after the epoch.
+        let far_before_epoch = Timestamp::from_second(-1_000_000)
+            .unwrap()
+            .checked_add(SignedDuration::from_nanos(123_456_789))
+            .unwrap();
+        assert_eq!(
+            format_timestamp(far_before_epoch),
+            "1969-12-20T10:13:20.123456789Z"
+        );
     }
 
     #[test]
@@ -428,6 +509,16 @@ mod tests {
             Timestamp::from_second(-2)
                 .unwrap()
                 .checked_add(SignedDuration::from_nanos(250_000_000))
+                .unwrap(),
+            // -1.5 seconds after the epoch.
+            Timestamp::from_second(-1)
+                .unwrap()
+                .checked_add(SignedDuration::from_nanos(-500_000_000))
+                .unwrap(),
+            // -999999.876543211 seconds after the epoch.
+            Timestamp::from_second(-1_000_000)
+                .unwrap()
+                .checked_add(SignedDuration::from_nanos(123_456_789))
                 .unwrap(),
         ] {
             let formatted = format_timestamp(timestamp);
@@ -503,6 +594,13 @@ mod tests {
             "2025-11-20T21:35:03.123456789Z"
         );
 
+        // Twelve fractional digits, as they can appear in an audit log.
+        let truncated = parse_timestamp("2025-11-20T21:35:03.123456789123Z").unwrap();
+        assert_eq!(
+            truncated,
+            parse_timestamp("2025-11-20T21:35:03.123456789Z").unwrap()
+        );
+
         let truncated = parse_timestamp("2025-11-20T21:35:03.123456789012+02:00").unwrap();
         assert_eq!(
             truncated,
@@ -511,19 +609,30 @@ mod tests {
     }
 
     #[test]
-    fn accepts_the_offset_forms_jiff_supports() {
-        // chrono rejected these offset spellings, jiff accepts them. We keep
-        // jiff's larger set; see JIFF_MIGRATION.md.
+    fn rejects_the_offset_spellings_chrono_rejected() {
+        // chrono only accepted `Z` and `±HH:MM`; jiff accepts more, so the
+        // extra spellings are rejected here to keep the parser compatible.
+        assert!(parse_timestamp("2025-11-20T21:35:03+0000").is_err());
+        assert!(parse_timestamp("2025-11-20T21:35:03+00").is_err());
+        assert!(parse_timestamp("2025-11-20T21:35:03+00:00:00").is_err());
+        assert!(parse_timestamp("2025-11-20T21:35:03-0500").is_err());
+
+        // The spellings chrono did accept still parse.
         let expected = parse_timestamp("2025-11-20T21:35:03Z").unwrap();
         assert_eq!(
-            parse_timestamp("2025-11-20T21:35:03+0000").unwrap(),
+            parse_timestamp("2025-11-20T21:35:03+00:00").unwrap(),
             expected
         );
-        assert_eq!(parse_timestamp("2025-11-20T21:35:03+00").unwrap(), expected);
-        assert_eq!(
-            parse_timestamp("2025-11-20T21:35:03+00:00:00").unwrap(),
-            expected
-        );
+        assert_eq!(parse_timestamp("2025-11-20T21:35:03z").unwrap(), expected);
+        assert_eq!(parse_timestamp("2025-11-20t21:35:03Z").unwrap(), expected);
+        assert_eq!(parse_timestamp("2025-11-20 21:35:03Z").unwrap(), expected);
+    }
+
+    #[test]
+    fn rejects_a_timestamp_without_seconds() {
+        // chrono rejected a time without a seconds field.
+        assert!(parse_timestamp("2025-11-20T21:35").is_err());
+        assert!(parse_timestamp("2025-11-20T21:35Z").is_err());
     }
 
     #[test]
