@@ -155,6 +155,68 @@ fn parse_two_digits(text: &str) -> Option<i32> {
     text.parse().ok()
 }
 
+/// Serde adapter for optional calendar dates.
+///
+/// `jiff`'s `Date` impls only accept the zero padded `YYYY-MM-DD` spelling,
+/// while chrono's `NaiveDate` also accepted one- or two-digit months and days
+/// and a signed year. This adapter deserializes through [`parse_iso_date`] —
+/// so JSON keeps accepting exactly what chrono accepted — and serializes the
+/// canonical zero padded spelling:
+///
+/// ```
+/// use jiff::civil::Date;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Serialize, Deserialize)]
+/// struct Entry {
+///     #[serde(with = "turbovault_core::datetime::iso_date")]
+///     due_date: Option<Date>,
+/// }
+///
+/// let entry: Entry = serde_json::from_str(r#"{"due_date":"2026-1-31"}"#).unwrap();
+/// assert_eq!(entry.due_date, Some(Date::new(2026, 1, 31).unwrap()));
+/// assert_eq!(
+///     serde_json::to_string(&entry).unwrap(),
+///     r#"{"due_date":"2026-01-31"}"#
+/// );
+/// ```
+pub mod iso_date {
+    use jiff::civil::Date;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// Serialize an optional date as `YYYY-MM-DD` (or `null`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the serializer fails.
+    pub fn serialize<S: Serializer>(
+        value: &Option<Date>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(date) => serializer.serialize_str(&date.to_string()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    /// Deserialize an optional date from an ISO `YYYY-MM-DD` string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the value is not a valid ISO date.
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Date>, D::Error> {
+        let raw = Option::<String>::deserialize(deserializer)?;
+        match raw {
+            None => Ok(None),
+            Some(text) => super::parse_iso_date(&text).map(Some).ok_or_else(|| {
+                serde::de::Error::custom(format!("invalid date {text:?} — expected YYYY-MM-DD"))
+            }),
+        }
+    }
+}
+
 /// Serde adapter that keeps the `chrono` wire shape for [`Timestamp`].
 ///
 /// `jiff`'s built-in `Timestamp` impls render fractional seconds with trimmed

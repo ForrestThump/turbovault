@@ -297,11 +297,17 @@ pub struct TaskItem {
     #[serde(default)]
     pub status: TaskStatus,
     pub position: SourcePosition,
+    #[serde(default, with = "crate::datetime::iso_date")]
     pub created_date: Option<Date>,
+    #[serde(default, with = "crate::datetime::iso_date")]
     pub scheduled_date: Option<Date>,
+    #[serde(default, with = "crate::datetime::iso_date")]
     pub start_date: Option<Date>,
+    #[serde(default, with = "crate::datetime::iso_date")]
     pub due_date: Option<Date>,
+    #[serde(default, with = "crate::datetime::iso_date")]
     pub done_date: Option<Date>,
+    #[serde(default, with = "crate::datetime::iso_date")]
     pub cancelled_date: Option<Date>,
     #[serde(default)]
     pub priority: TaskPriority,
@@ -1253,5 +1259,92 @@ mod tests {
             serde_json::to_value(TaskPriority::High).unwrap(),
             serde_json::Value::String("HIGH".to_string())
         );
+    }
+
+    #[test]
+    fn test_task_item_dates_accept_the_chrono_spellings() {
+        // chrono accepted one- or two-digit months and days and a signed year
+        // in its `NaiveDate` serde impl, so the JSON has to keep accepting
+        // them.
+        let json = r#"{
+            "content": "write the migration notes",
+            "is_completed": false,
+            "position": {"line": 1, "column": 1, "offset": 0, "length": 24},
+            "created_date": "2026-1-31",
+            "scheduled_date": "2026-01-1",
+            "start_date": "+2026-01-31",
+            "due_date": "2026-02-28",
+            "done_date": null,
+            "cancelled_date": null
+        }"#;
+
+        let task: TaskItem = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            task.created_date,
+            Some(jiff::civil::Date::new(2026, 1, 31).unwrap())
+        );
+        assert_eq!(
+            task.scheduled_date,
+            Some(jiff::civil::Date::new(2026, 1, 1).unwrap())
+        );
+        assert_eq!(
+            task.start_date,
+            Some(jiff::civil::Date::new(2026, 1, 31).unwrap())
+        );
+        assert_eq!(
+            task.due_date,
+            Some(jiff::civil::Date::new(2026, 2, 28).unwrap())
+        );
+        assert_eq!(task.done_date, None);
+        assert_eq!(task.cancelled_date, None);
+    }
+
+    #[test]
+    fn test_task_item_dates_serialize_as_zero_padded_and_round_trip() {
+        let json = r#"{
+            "content": "write the migration notes",
+            "is_completed": false,
+            "position": {"line": 1, "column": 1, "offset": 0, "length": 24},
+            "created_date": "2026-1-31",
+            "scheduled_date": "2026-01-1",
+            "start_date": "+2026-01-31",
+            "due_date": "2026-02-28",
+            "done_date": null,
+            "cancelled_date": null
+        }"#;
+
+        let task: TaskItem = serde_json::from_str(json).unwrap();
+        let value = serde_json::to_value(&task).unwrap();
+        assert_eq!(value["created_date"], "2026-01-31");
+        assert_eq!(value["scheduled_date"], "2026-01-01");
+        assert_eq!(value["start_date"], "2026-01-31");
+        assert_eq!(value["due_date"], "2026-02-28");
+        assert!(value["done_date"].is_null());
+        assert!(value["cancelled_date"].is_null());
+
+        let round_tripped: TaskItem = serde_json::from_value(value).unwrap();
+        assert_eq!(round_tripped.created_date, task.created_date);
+        assert_eq!(round_tripped.scheduled_date, task.scheduled_date);
+        assert_eq!(round_tripped.start_date, task.start_date);
+        assert_eq!(round_tripped.due_date, task.due_date);
+        assert_eq!(round_tripped.done_date, task.done_date);
+        assert_eq!(round_tripped.cancelled_date, task.cancelled_date);
+    }
+
+    #[test]
+    fn test_task_item_dates_reject_invalid_spellings() {
+        let json = r#"{
+            "content": "write the migration notes",
+            "is_completed": false,
+            "position": {"line": 1, "column": 1, "offset": 0, "length": 24},
+            "created_date": "2026-011-02",
+            "scheduled_date": null,
+            "start_date": null,
+            "due_date": null,
+            "done_date": null,
+            "cancelled_date": null
+        }"#;
+
+        assert!(serde_json::from_str::<TaskItem>(json).is_err());
     }
 }
