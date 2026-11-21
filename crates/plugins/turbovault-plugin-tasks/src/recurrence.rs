@@ -194,6 +194,56 @@ mod tests {
     }
 
     #[test]
+    fn a_negative_count_moves_to_a_past_date() {
+        // A negative count is not an error: the recurrence moves backwards.
+        let (due, _, _) = compute_next_occurrence(
+            "every -1 month",
+            Some(date("2026-03-15")),
+            None,
+            None,
+            date("2026-03-15"),
+        )
+        .unwrap();
+        assert_eq!(due, Some(date("2026-02-15")));
+
+        let (due, _, _) = compute_next_occurrence(
+            "every -3 days",
+            Some(date("2026-03-15")),
+            None,
+            None,
+            date("2026-03-15"),
+        )
+        .unwrap();
+        assert_eq!(due, Some(date("2026-03-12")));
+
+        let (due, _, _) = compute_next_occurrence(
+            "every -1 week",
+            Some(date("2026-03-15")),
+            None,
+            None,
+            date("2026-03-15"),
+        )
+        .unwrap();
+        assert_eq!(due, Some(date("2026-03-08")));
+    }
+
+    #[test]
+    fn an_interval_beyond_the_calendar_range_has_no_next_occurrence() {
+        // The calendar arithmetic covers roughly the years -9999..9999, so an
+        // interval of more than about 7,304,484 days has no next occurrence.
+        assert!(
+            compute_next_occurrence(
+                "every 8000000 days",
+                Some(date("2026-03-15")),
+                None,
+                None,
+                date("2026-03-15")
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn unrecognized_rule_is_none() {
         assert!(
             compute_next_occurrence(

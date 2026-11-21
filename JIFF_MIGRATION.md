@@ -136,9 +136,18 @@ The **supported range** of the timestamp helpers is the RFC 3339 year range,
 * **Audit filtering**: the `since`/`until` window is still exclusive on both
   ends (`entry_time < since` / `entry_time > until` are the only skips).
 
-Two edge cases became well-defined instead of panicking: a recurrence count so
-large that it overflows, or a negative month count, now yield "no next
-occurrence" (`None`) instead of `chrono`'s debug-build overflow panic.
+Two edge cases of the recurrence arithmetic changed:
+
+* **A negative count is not an error.** `every -1 month` from 2026-03-15
+  yields 2026-02-15, a date in the past, and `every -3 days` yields
+  2026-03-12. `chrono` computed the same dates, but its `u32` month
+  arithmetic overflowed (and panicked in debug builds) for a negative month
+  count.
+* **The range of the calendar arithmetic is narrower.** `jiff` covers roughly
+  the years `-9999`..`9999`, `chrono` covered more, so an interval of more
+  than about 7,304,484 days (roughly 20,000 years) has no next occurrence
+  (`None`) here. `every 8000000 days` is such an interval; `chrono` could
+  still express a date for it.
 
 ## Tests added
 
