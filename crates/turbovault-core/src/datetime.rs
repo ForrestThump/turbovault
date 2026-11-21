@@ -42,7 +42,17 @@ use jiff::civil::Date;
 /// ```
 #[must_use]
 pub fn format_timestamp(timestamp: Timestamp) -> String {
-    let nanos = timestamp.subsec_nanosecond();
+    // `jiff` reports a *negative* sub-second component for instants before the
+    // Unix epoch: its second is truncated towards zero instead of floored, so
+    // `1969-12-31T23:59:59.5Z` is stored as second `0` with `-500_000_000`
+    // nanoseconds. Normalize to the non-negative nanosecond within the second,
+    // which is what `chrono` reported.
+    let raw_nanos = timestamp.subsec_nanosecond();
+    let nanos = if raw_nanos < 0 {
+        raw_nanos + 1_000_000_000
+    } else {
+        raw_nanos
+    };
     let fraction = if nanos == 0 {
         String::new()
     } else if nanos % 1_000_000 == 0 {
@@ -200,6 +210,53 @@ mod tests {
             format_timestamp(timestamp(100)),
             "2025-11-20T21:35:03.000000100Z"
         );
+    }
+
+    #[test]
+    fn formats_pre_epoch_timestamps_like_chrono_serde() {
+        // Before 1970 `jiff` reports a negative sub-second component; the
+        // rendering must still match what chrono wrote.
+        let half_second_before_epoch = Timestamp::from_second(-1)
+            .unwrap()
+            .checked_add(SignedDuration::from_nanos(500_000_000))
+            .unwrap();
+        assert_eq!(
+            format_timestamp(half_second_before_epoch),
+            "1969-12-31T23:59:59.500Z"
+        );
+
+        let quarter_second_before_epoch = Timestamp::from_second(-2)
+            .unwrap()
+            .checked_add(SignedDuration::from_nanos(250_000_000))
+            .unwrap();
+        assert_eq!(
+            format_timestamp(quarter_second_before_epoch),
+            "1969-12-31T23:59:58.250Z"
+        );
+
+        let whole_second_before_epoch = Timestamp::from_second(-1).unwrap();
+        assert_eq!(
+            format_timestamp(whole_second_before_epoch),
+            "1969-12-31T23:59:59Z"
+        );
+    }
+
+    #[test]
+    fn round_trips_pre_epoch_timestamps() {
+        for timestamp in [
+            Timestamp::from_second(-1).unwrap(),
+            Timestamp::from_second(-1)
+                .unwrap()
+                .checked_add(SignedDuration::from_nanos(500_000_000))
+                .unwrap(),
+            Timestamp::from_second(-2)
+                .unwrap()
+                .checked_add(SignedDuration::from_nanos(250_000_000))
+                .unwrap(),
+        ] {
+            let formatted = format_timestamp(timestamp);
+            assert_eq!(parse_timestamp(&formatted).unwrap(), timestamp);
+        }
     }
 
     #[test]
