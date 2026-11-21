@@ -95,17 +95,39 @@ the parser still accepts `+00:00` and `-05:00` offsets with or without
 fractional seconds.
 
 Calendar dates are unaffected: `chrono::NaiveDate` and `jiff::civil::Date` both
-serialize as `YYYY-MM-DD`, and both deserialize from that spelling.
+serialize as `YYYY-MM-DD`. Deserialization keeps `chrono`'s leniency through
+`turbovault_core::datetime::parse_iso_date`: one- or two-digit months and days
+(`2026-1-31`, `2026-01-1`) and a signed year (`+2026-01-31`) are accepted,
+while the spellings `chrono` rejected (`2026-011-02`, `2026-01-031`,
+`2026-01-+1`) are rejected as well. `TaskItem`'s date fields go through that
+parser (see `datetime::iso_date`), so their JSON accepts exactly what
+`chrono`'s `NaiveDate` serde impl accepted.
+
+## Known deltas vs `chrono`
+
+| Topic | `chrono` | Here (`jiff`) |
+|---|---|---|
+| Leap second (`:60`) | accepted; the parsed value is the instant right after `23:59:59` | same: accepted, and mapped to the following second (`2016-12-31T23:59:60Z` → `2017-01-01T00:00:00Z`) |
+| Leap second, *rendered* | kept the `23:59:60` spelling | `jiff`'s `Timestamp` cannot hold a leap second, so the equivalent instant is rendered (`2017-01-01T00:00:00Z`) |
+| Fraction with more than 9 digits | truncated to nanosecond precision | same: truncated to nanosecond precision |
+| Offset without a colon (`+0000`), hour-only offset (`+00`), offset with a seconds field (`+00:00:00`) | rejected | accepted (`jiff`'s larger set) |
+| Year outside `0000`..=`9999` | rendered as a signed five digit year (`-0001-01-01T00:00:00Z`) | rendered as a signed six digit year (`-000001-01-01T00:00:00Z`) |
+| Range of representable instants | roughly `-262144`..=`262144` years | `jiff`'s `Timestamp` range, roughly `-009999-01-02`..`9999-12-30` |
+| Whitespace before a numeric date field (`2026-01- 1`) | skipped, so accepted | rejected — the month and the day must be one or two digits |
+
+The **supported range** of the timestamp helpers is the RFC 3339 year range,
+`0000`..=`9999`; inside it the rendering and the parsing are identical to
+`chrono`'s.
 
 ## Behavior preserved
 
 * **Local "today"**: `chrono::Local::now().date_naive()` became
   `jiff::Zoned::now().date()` — the civil date in the host time zone.
 * **Lenient date parsing**: `chrono`'s `%Y-%m-%d` accepted one- or two-digit
-  months and days and skipped leading whitespace; `jiff`'s civil parser does
-  not, so `turbovault_core::datetime::parse_iso_date` keeps the old leniency
-  (used by task metadata parsing, the tasks plugin tool arguments, and the OKF
-  log-entry date).
+  months and days, an explicitly signed year, and leading whitespace; `jiff`'s
+  civil parser does not, so `turbovault_core::datetime::parse_iso_date` keeps
+  the old leniency (used by task metadata parsing, the tasks plugin tool
+  arguments, and the OKF log-entry date).
 * **Recurrence math**: `every N days/weeks/months/years/weekdays/weekends` is
   still calendar math with the same clamping (Jan 31 + 1 month → Feb 28/29,
   Feb 29 + 1 year → Feb 28). The month arithmetic reproduces `chrono`'s
@@ -123,7 +145,13 @@ occurrence" (`None`) instead of `chrono`'s debug-build overflow panic.
   serde output for every SI-precision case, round-trips, parsing of the strings
   `chrono` produced (`+00:00`, `-05:00`, `Z`, with and without fractional
   seconds), rejection of non-RFC-3339 input, lenient ISO date parsing, and the
-  serde adapter.
+  serde adapter. Later rounds added: the pre-epoch sub-second normalization
+  (`1969-12-31T23:59:59.500Z`), the tightened month/day field widths, the
+  signed year, the leap second, the over-long fraction, the offset spellings
+  `jiff` accepts, and the RFC 3339 year range.
+* `turbovault-core::models`: a `TaskItem` JSON round-trip with the unpadded
+  and signed date spellings `chrono` accepted, the zero padded spelling on
+  the way out, and the rejection of a spelling `chrono` rejected.
 * `turbovault-audit`: the audit log timestamp is RFC 3339 UTC with a `Z`
   suffix, `since`/`until` filtering works with `jiff::Timestamp`, and entries
   written by the `chrono` era (`+00:00` offsets) are still read and filtered.
@@ -132,8 +160,9 @@ occurrence" (`None`) instead of `chrono`'s debug-build overflow panic.
   2029, + 4 years → Feb 29 2032), daylight saving transitions
   (America/Chicago spring-forward 2026-03-08 and fall-back 2026-11-01: the
   recurrence advances by exactly one calendar day while the elapsed time is 23
-  resp. 25 hours), and the disambiguation of the nonexistent 02:30 and the
-  ambiguous 01:30 local times.
+  resp. 25 hours), the disambiguation of the nonexistent 02:30 and the
+  ambiguous 01:30 local times, and the recurrence itself across both
+  transition days.
 
 ## `chrono` still in the dependency tree
 

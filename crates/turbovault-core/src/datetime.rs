@@ -33,6 +33,11 @@ use jiff::{SignedDuration, Timestamp};
 /// fractional seconds: omitted when the timestamp is a whole second,
 /// otherwise 3, 6, or 9 digits.
 ///
+/// The supported range is the RFC 3339 year range, `0000`..=`9999`; inside it
+/// the rendering is identical to chrono's. Outside of it chrono wrote a
+/// signed five digit year (`-0001-01-01T00:00:00Z`) while `jiff` writes a
+/// signed six digit one (`-000001-01-01T00:00:00Z`); see `JIFF_MIGRATION.md`.
+///
 /// # Examples
 ///
 /// ```
@@ -91,6 +96,10 @@ pub fn format_now() -> String {
 /// `jiff` additionally accepts offset spellings chrono rejected (an offset
 /// without a colon such as `+0000`, an hour-only offset such as `+00`, and an
 /// offset with a seconds field such as `+00:00:00`); see `JIFF_MIGRATION.md`.
+///
+/// The supported range is the RFC 3339 year range, `0000`..=`9999`; `jiff`'s
+/// own `Timestamp` range reaches further (`-009999-01-02`..`9999-12-30`), and
+/// chrono reached further still.
 pub fn parse_timestamp(raw: &str) -> Result<Timestamp, jiff::Error> {
     let (text, leap_second) = normalize_for_chrono(raw);
     let timestamp = text.parse::<Timestamp>()?;
@@ -515,6 +524,23 @@ mod tests {
             parse_timestamp("2025-11-20T21:35:03+00:00:00").unwrap(),
             expected
         );
+    }
+
+    #[test]
+    fn renders_the_rfc3339_year_range_like_chrono() {
+        // RFC 3339 covers the years 0000 to 9999, and chrono rendered that
+        // whole range the same way jiff does.
+        let year_zero = Timestamp::from_second(-62_167_219_200).unwrap();
+        assert_eq!(format_timestamp(year_zero), "0000-01-01T00:00:00Z");
+
+        let year_9999 = Timestamp::from_second(253_402_207_200).unwrap();
+        assert_eq!(format_timestamp(year_9999), "9999-12-30T22:00:00Z");
+
+        // Outside of that range chrono wrote a signed five digit year while
+        // jiff writes a signed six digit one. The supported range is
+        // documented in JIFF_MIGRATION.md.
+        let year_minus_one = Timestamp::from_second(-62_198_755_200).unwrap();
+        assert_eq!(format_timestamp(year_minus_one), "-000001-01-01T00:00:00Z");
     }
 
     #[test]
