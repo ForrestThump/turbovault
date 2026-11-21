@@ -475,4 +475,58 @@ mod tests {
             "2026-11-01T01:30:00-06:00[America/Chicago]"
         );
     }
+
+    /// The recurrence itself is calendar math, so a task due on a transition
+    /// day is still due on that day — and the scheduled and start dates move
+    /// with it.
+    #[test]
+    fn recurrence_survives_the_dst_gap_and_fold() {
+        // Spring forward: 2026-03-08 (the day 02:30 does not exist on).
+        let (due, scheduled, start) = compute_next_occurrence(
+            "every day",
+            Some(date("2026-03-08")),
+            Some(date("2026-03-08")),
+            Some(date("2026-03-08")),
+            date("2026-03-08"),
+        )
+        .unwrap();
+        assert_eq!(due, Some(date("2026-03-09")));
+        assert_eq!(scheduled, Some(date("2026-03-09")));
+        assert_eq!(start, Some(date("2026-03-09")));
+
+        // A weekly rule that lands exactly on the transition day.
+        let (due, _, _) = compute_next_occurrence(
+            "every week",
+            Some(date("2026-03-01")),
+            None,
+            None,
+            date("2026-03-01"),
+        )
+        .unwrap();
+        assert_eq!(due, Some(date("2026-03-08")));
+
+        // Fall back: 2026-11-01 (the day 01:30 happens twice on).
+        let (due, scheduled, start) = compute_next_occurrence(
+            "every day",
+            Some(date("2026-11-01")),
+            Some(date("2026-11-01")),
+            Some(date("2026-11-01")),
+            date("2026-11-01"),
+        )
+        .unwrap();
+        assert_eq!(due, Some(date("2026-11-02")));
+        assert_eq!(scheduled, Some(date("2026-11-02")));
+        assert_eq!(start, Some(date("2026-11-02")));
+
+        // A weekly rule that lands exactly on the transition day.
+        let (due, _, _) = compute_next_occurrence(
+            "every week",
+            Some(date("2026-10-25")),
+            None,
+            None,
+            date("2026-10-25"),
+        )
+        .unwrap();
+        assert_eq!(due, Some(date("2026-11-01")));
+    }
 }
