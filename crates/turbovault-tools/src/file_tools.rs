@@ -1,11 +1,13 @@
 //! File operation tools for the Obsidian MCP server
 
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use tokio::io::AsyncReadExt;
 use turbovault_core::Precondition;
+use turbovault_core::datetime::format_timestamp;
 use turbovault_core::prelude::*;
 use turbovault_vault::VaultManager;
 
@@ -344,8 +346,8 @@ impl FileTools {
                         .ok()
                         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                         .map(|d| {
-                            chrono::DateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos())
-                                .map(|dt| dt.to_rfc3339())
+                            Timestamp::new(d.as_secs() as i64, d.subsec_nanos() as i32)
+                                .map(format_timestamp)
                                 .unwrap_or_default()
                         });
 

@@ -6,11 +6,13 @@
 //!
 //! Also provides pairwise note comparison with diff summaries.
 
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
+use turbovault_core::datetime::format_timestamp;
 use turbovault_core::prelude::*;
 use turbovault_parser::to_plain_text;
 use turbovault_vault::VaultManager;
@@ -226,9 +228,9 @@ impl DuplicateTools {
 }
 
 fn make_duplicate_note(fp: &DocFingerprint) -> DuplicateNote {
-    let modified_at = chrono::DateTime::from_timestamp(fp.modified_at as i64, 0)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_else(|| "unknown".to_string());
+    let modified_at = Timestamp::from_second(fp.modified_at as i64)
+        .map(format_timestamp)
+        .unwrap_or_else(|_| "unknown".to_string());
 
     DuplicateNote {
         path: fp.path.to_string_lossy().to_string(),

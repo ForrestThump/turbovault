@@ -19,9 +19,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use jiff::Zoned;
 use serde::{Deserialize, Serialize};
 use turbovault_core::Precondition;
 use turbovault_core::Result;
+use turbovault_core::datetime::parse_iso_date;
 use turbovault_core::okf::{self, ReservedFile};
 use turbovault_parser::parse_citations;
 use turbovault_vault::VaultManager;
@@ -449,14 +451,14 @@ impl OkfTools {
     ) -> Result<LogEntryResult> {
         let date = match date {
             Some(d) => {
-                chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| {
+                parse_iso_date(d).ok_or_else(|| {
                     turbovault_core::Error::parse_error(format!(
                         "invalid date '{d}' — expected ISO YYYY-MM-DD"
                     ))
                 })?;
                 d.to_string()
             }
-            None => chrono::Local::now().format("%Y-%m-%d").to_string(),
+            None => Zoned::now().date().to_string(),
         };
         let kind = kind.unwrap_or("Update");
 

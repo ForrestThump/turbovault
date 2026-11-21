@@ -161,8 +161,8 @@
 //! - No I/O operations within exporters
 //! - Suitable for batch processing large datasets
 
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use turbovault_core::datetime::format_now;
 use turbovault_core::prelude::*;
 use turbovault_core::to_json_string;
 
@@ -417,7 +417,7 @@ pub fn create_health_report(
     }
 
     HealthReport {
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: format_now(),
         vault_name: vault_name.to_string(),
         health_score,
         total_notes,

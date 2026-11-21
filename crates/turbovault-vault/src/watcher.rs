@@ -206,20 +206,17 @@ impl VaultWatcher {
     fn should_emit_event(event: &VaultEvent, config: &WatcherConfig) -> bool {
         let path = event.path();
 
-        // Check if hidden file
-        if config.ignore_hidden
-            && let Some(file_name) = path.file_name().and_then(|n| n.to_str())
-            && file_name.starts_with('.')
-        {
-            return false;
-        }
+        // Hidden files are only filtered when the config asks for it.
+        let is_hidden = config.ignore_hidden
+            && path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|file_name| file_name.starts_with('.'));
 
-        // Check if markdown file
-        if config.markdown_only && !event.is_markdown() {
-            return false;
-        }
+        // Non-markdown files are only filtered when the config asks for it.
+        let is_not_markdown = config.markdown_only && !event.is_markdown();
 
-        true
+        !is_hidden && !is_not_markdown
     }
 }
 

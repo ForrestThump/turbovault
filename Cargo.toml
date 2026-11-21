@@ -42,7 +42,7 @@ async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["raw_value", "preserve_order"] }
 yaml_serde = "0.10.4"  # Maintained serde_yaml fork from The YAML Organization
-schemars = "1.2"
+schemars = { version = "1.2", features = ["jiff02"] }
 
 # Markdown Parsing (2025 diligence: see DEPENDENCY_DILIGENCE_2025.md)
 pulldown-cmark = "0.13"      # CommonMark parser with OFM extensions (headings, tasks, frontmatter, code blocks)
@@ -67,7 +67,7 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Utilities
-chrono = { version = "0.4", features = ["serde"] }
+jiff = { version = "=0.2.35", features = ["serde"] }
 uuid = { version = "1.23", features = ["v4", "serde"] }
 dashmap = "6.1"
 

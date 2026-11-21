@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Plugin contract review follow-up**: Plugin-local and fully namespaced tool names are centrally validated against MCP SEP-986, enabled namespaces are described during MCP initialization only when plugins are registered, feature-on tests are required for every vertical, and core/plugin complete-note writes share preparation and cache-finalization orchestration.
 
+### Changed (breaking)
+
+- **`chrono` replaced by `jiff`** ([JIFF_MIGRATION.md](JIFF_MIGRATION.md)): The workspace no longer depends on `chrono` directly. `TaskItem`'s date fields (`created_date`, `scheduled_date`, `start_date`, `due_date`, `done_date`, `cancelled_date`) are `jiff::civil::Date` instead of `chrono::NaiveDate`, and `AuditFilter::since`, `AuditFilter::until` and `AuditFilter::with_since` take a `jiff::Timestamp` instead of a `chrono::DateTime<Utc>`. The wire format is unchanged — timestamps stay RFC 3339 UTC (`2026-11-20T22:15:03.123456Z`) and calendar dates stay `YYYY-MM-DD` — and the full list of changes and of the remaining transitive `chrono` is in [JIFF_MIGRATION.md](JIFF_MIGRATION.md).
+
 ## [1.6.0] - 2026-07-17
 
 ### Added
