@@ -1096,7 +1096,7 @@ tantivy = "0.22"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-chrono = { workspace = true, features = ["serde"] }
+jiff = { workspace = true }
 ```
 
 ## Architecture Design Choices

@@ -1,6 +1,7 @@
 //! Export tools for vault analysis data
 
 use std::sync::Arc;
+use turbovault_core::datetime::format_now;
 use turbovault_core::prelude::*;
 use turbovault_export::{
     AnalysisReportExporter, BrokenLinkRecord, BrokenLinksExporter, HealthReportExporter,
@@ -105,7 +106,7 @@ impl ExportTools {
         };
 
         let stats_record = VaultStatsRecord {
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: format_now(),
             vault_name: "default".to_string(),
             total_files: stats.total_files,
             total_links: stats.total_links,
@@ -154,7 +155,7 @@ impl ExportTools {
         );
 
         let analysis_report = turbovault_export::AnalysisReport {
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: format_now(),
             vault_name: "default".to_string(),
             health,
             broken_links_count: broken_links,

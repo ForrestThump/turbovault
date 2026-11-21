@@ -28,6 +28,7 @@ htmlcov/
 !README.md
 !docs/**/*.md
 !CHANGELOG.md
+!JIFF_MIGRATION.md
 !RELEASE*.md
 !PUBLISH*.md
 !/LICENSE*

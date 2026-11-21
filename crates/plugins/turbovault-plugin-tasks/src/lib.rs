@@ -42,10 +42,12 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::NaiveDate;
+use jiff::Zoned;
+use jiff::civil::Date;
 use serde_json::{Value, json};
 use tokio::sync::OnceCell;
 use turbomcp_types::ToolInputSchema;
+use turbovault_core::datetime::parse_iso_date;
 use turbovault_core::{TaskItem, TaskPriority, TaskStatus};
 use turbovault_plugin_api::{
     Plugin, PluginContext, PluginDescriptor, PluginError, PluginProvider, PluginRequestContext,
@@ -480,7 +482,7 @@ impl TasksProvider {
     async fn overdue(&self, args: &Value) -> PluginResult<ToolResult> {
         let as_of = match get_str(args, "as_of") {
             Some(raw) if !raw.is_empty() => parse_date(raw, "as_of")?,
-            _ => chrono::Local::now().date_naive(),
+            _ => Zoned::now().date(),
         };
 
         let mut overdue = Vec::new();
@@ -492,7 +494,7 @@ impl TasksProvider {
                 && due < as_of
             {
                 let mut entry = task_json(&path, &task);
-                entry["days_overdue"] = json!((as_of - due).num_days());
+                entry["days_overdue"] = json!((as_of - due).get_days());
                 overdue.push(entry);
             }
         }
@@ -532,7 +534,7 @@ impl TasksProvider {
         let line = required_line(args)?;
         let done = match get_str(args, "done_date") {
             Some(raw) if !raw.is_empty() => parse_date(raw, "done_date")?,
-            _ => chrono::Local::now().date_naive(),
+            _ => Zoned::now().date(),
         };
 
         let snapshot = self.vault.read_note(path).await?;
@@ -769,8 +771,8 @@ fn verify_version(args: &Value, actual: &str) -> PluginResult<()> {
     Ok(())
 }
 
-fn parse_date(raw: &str, field: &str) -> PluginResult<NaiveDate> {
-    NaiveDate::parse_from_str(raw, "%Y-%m-%d").map_err(|_| {
+fn parse_date(raw: &str, field: &str) -> PluginResult<Date> {
+    parse_iso_date(raw).ok_or_else(|| {
         PluginError::invalid_input(format!("invalid {field} {raw:?} — use YYYY-MM-DD"))
     })
 }
@@ -804,7 +806,7 @@ fn task_at_line(content: &str, line: usize, path: &str) -> PluginResult<TaskItem
 ///
 /// Operates directly on the source line so no task metadata is lost to a
 /// round-trip through `TaskItem`.
-fn mark_line_completed(line: &str, done: NaiveDate) -> PluginResult<String> {
+fn mark_line_completed(line: &str, done: Date) -> PluginResult<String> {
     let bytes = line.as_bytes();
     let mut checkbox = None;
     let mut i = 0;
@@ -958,7 +960,7 @@ fn string_array<'a>(value: &'a Value, key: &str) -> PluginResult<Vec<&'a str>> {
         .collect()
 }
 
-fn edit_date(field: &mut Option<NaiveDate>, args: &Value, key: &str) -> PluginResult<()> {
+fn edit_date(field: &mut Option<Date>, args: &Value, key: &str) -> PluginResult<()> {
     match args.get(key) {
         None => {}
         Some(Value::Null) => *field = None,

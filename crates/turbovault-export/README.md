@@ -331,12 +331,12 @@ std::fs::write("vault_stats.md", stats_md)?;
 ### Example 4: Automated Reporting
 
 ```rust
-use chrono::Utc;
+use jiff::Zoned;
 
 // Generate daily health report
 let engine = ExportEngine::new(vault_manager, graph, search_engine)?;
 
-let timestamp = Utc::now().format("%Y-%m-%d").to_string();
+let timestamp = Zoned::now().date().to_string();
 let report_name = format!("health_report_{}.json", timestamp);
 
 // Export health report
@@ -449,7 +449,7 @@ cargo test -- --nocapture
 - **serde**: Serialization framework
 - **serde_json**: JSON serialization
 - **csv**: CSV serialization
-- **chrono**: Timestamp handling
+- **jiff**: Timestamp handling
 
 ## Design Decisions
 

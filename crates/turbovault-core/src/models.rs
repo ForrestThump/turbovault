@@ -8,7 +8,7 @@
 //!
 //! The types roughly correspond to Python dataclasses in the reference implementation.
 
-use chrono::NaiveDate;
+use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -297,12 +297,12 @@ pub struct TaskItem {
     #[serde(default)]
     pub status: TaskStatus,
     pub position: SourcePosition,
-    pub created_date: Option<NaiveDate>,
-    pub scheduled_date: Option<NaiveDate>,
-    pub start_date: Option<NaiveDate>,
-    pub due_date: Option<NaiveDate>,
-    pub done_date: Option<NaiveDate>,
-    pub cancelled_date: Option<NaiveDate>,
+    pub created_date: Option<Date>,
+    pub scheduled_date: Option<Date>,
+    pub start_date: Option<Date>,
+    pub due_date: Option<Date>,
+    pub done_date: Option<Date>,
+    pub cancelled_date: Option<Date>,
     #[serde(default)]
     pub priority: TaskPriority,
     /// Recurrence rule text, for example `every weekday`.
@@ -459,8 +459,8 @@ impl TaskBuilder {
     }
 }
 
-fn parse_date_opt(value: Option<&str>) -> Option<NaiveDate> {
-    NaiveDate::parse_from_str(value?, "%Y-%m-%d").ok()
+fn parse_date_opt(value: Option<&str>) -> Option<Date> {
+    crate::datetime::parse_iso_date(value?)
 }
 
 /// Type of callout block

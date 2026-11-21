@@ -15,6 +15,7 @@
 //!
 //! - [`models`] - Core vault data types (VaultFile, Link, Frontmatter, etc.)
 //! - [`error`] - Comprehensive error types and Result aliases
+//! - [`datetime`] - RFC 3339 timestamp / ISO date helpers (`jiff` based)
 //! - [`config`] - Server and vault configuration structures
 //! - [`validation`] - Content validation framework
 //! - [`metrics`] - Performance monitoring and statistics
@@ -77,6 +78,7 @@
 pub mod cache;
 pub mod change_plan;
 pub mod config;
+pub mod datetime;
 pub mod error;
 pub mod metrics;
 pub mod models;
@@ -91,6 +93,7 @@ pub mod validation;
 
 pub use change_plan::{Change, ChangePlan};
 pub use config::*;
+pub use datetime::{format_now, format_timestamp, parse_iso_date, parse_timestamp};
 pub use error::{Error, Result};
 pub use metrics::{Counter, Histogram, HistogramStats, HistogramTimer, MetricsContext};
 pub use models::*;

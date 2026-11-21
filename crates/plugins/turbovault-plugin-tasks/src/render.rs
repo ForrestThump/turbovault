@@ -114,7 +114,7 @@ fn dated(
     format: TaskFormat,
     emoji: &str,
     key: &str,
-    date: Option<chrono::NaiveDate>,
+    date: Option<jiff::civil::Date>,
 ) -> Option<String> {
     date.map(|date| scalar(format, emoji, key, &date.to_string()))
 }

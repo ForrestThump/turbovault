@@ -28,7 +28,6 @@ anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 sha2 = { workspace = true }
-chrono = { workspace = true }
 walkdir = { workspace = true }
 
 fastembed  = { version = "5.13", optional = true }

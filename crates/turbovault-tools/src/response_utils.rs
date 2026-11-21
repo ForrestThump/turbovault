@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use turbovault_core::datetime::format_now;
 
 /// Vault context information for responses
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,7 +217,7 @@ impl EnhancedResponse {
             next_suggested_tools: Vec::new(),
             chain_explanation: None,
             execution_time_ms: 0,
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: format_now(),
         }
     }
 

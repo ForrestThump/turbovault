@@ -1,11 +1,12 @@
 //! Append-only JSONL audit log for vault operations
 
-use chrono::Utc;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 use turbovault_core::Result;
+use turbovault_core::datetime::{format_now, parse_timestamp};
 use turbovault_core::error::Error;
 use uuid::Uuid;
 
@@ -58,7 +59,7 @@ impl AuditEntry {
     pub fn new(operation: OperationType, path: impl Into<String>) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: format_now(),
             operation,
             path: path.into(),
             new_path: None,
@@ -98,8 +99,8 @@ impl AuditEntry {
 pub struct AuditFilter {
     pub path: Option<String>,
     pub operation: Option<OperationType>,
-    pub since: Option<chrono::DateTime<Utc>>,
-    pub until: Option<chrono::DateTime<Utc>>,
+    pub since: Option<Timestamp>,
+    pub until: Option<Timestamp>,
     pub limit: usize,
 }
 
@@ -121,7 +122,7 @@ impl AuditFilter {
         self
     }
 
-    pub fn with_since(mut self, since: chrono::DateTime<Utc>) -> Self {
+    pub fn with_since(mut self, since: Timestamp) -> Self {
         self.since = Some(since);
         self
     }
@@ -242,14 +243,14 @@ impl AuditLog {
             }
 
             if let Some(ref since) = filter.since
-                && let Ok(entry_time) = chrono::DateTime::parse_from_rfc3339(&entry.timestamp)
+                && let Ok(entry_time) = parse_timestamp(&entry.timestamp)
                 && entry_time < *since
             {
                 continue;
             }
 
             if let Some(ref until) = filter.until
-                && let Ok(entry_time) = chrono::DateTime::parse_from_rfc3339(&entry.timestamp)
+                && let Ok(entry_time) = parse_timestamp(&entry.timestamp)
                 && entry_time > *until
             {
                 continue;
@@ -347,6 +348,7 @@ async fn compute_dir_size(dir: &Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jiff::SignedDuration;
 
     #[tokio::test]
     async fn test_audit_log_record_and_query() {
@@ -433,5 +435,91 @@ mod tests {
 
         let stats = log.stats().await.unwrap();
         assert_eq!(stats.total_operations, 0);
+    }
+
+    #[tokio::test]
+    async fn test_entry_timestamp_is_rfc3339_utc() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let log = AuditLog::new(temp_dir.path()).await.unwrap();
+
+        let entry = AuditEntry::new(OperationType::Create, "a.md");
+        assert!(
+            entry.timestamp.ends_with('Z'),
+            "timestamp must be UTC with a Z suffix: {}",
+            entry.timestamp
+        );
+        assert!(
+            parse_timestamp(&entry.timestamp).is_ok(),
+            "timestamp must parse as RFC 3339: {}",
+            entry.timestamp
+        );
+
+        log.record(&entry).await.unwrap();
+        let raw =
+            tokio::fs::read_to_string(temp_dir.path().join(".turbovault/audit/operations.jsonl"))
+                .await
+                .unwrap();
+        assert!(raw.contains(&entry.timestamp));
+    }
+
+    #[tokio::test]
+    async fn test_filter_by_timestamp_window() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let log = AuditLog::new(temp_dir.path()).await.unwrap();
+
+        log.record(&AuditEntry::new(OperationType::Create, "a.md"))
+            .await
+            .unwrap();
+
+        let entries = log.query(&AuditFilter::new()).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        let written = parse_timestamp(&entries[0].timestamp).unwrap();
+
+        // The window is exclusive on both ends: an entry exactly at the
+        // boundary is kept, one strictly outside is dropped.
+        let mut since = AuditFilter::new();
+        since.since = Some(written);
+        assert_eq!(log.query(&since).await.unwrap().len(), 1);
+
+        let mut since = AuditFilter::new();
+        since.since = Some(written.checked_add(SignedDuration::from_nanos(1)).unwrap());
+        assert!(log.query(&since).await.unwrap().is_empty());
+
+        let mut until = AuditFilter::new();
+        until.until = Some(written);
+        assert_eq!(log.query(&until).await.unwrap().len(), 1);
+
+        let mut until = AuditFilter::new();
+        until.until = Some(written.checked_sub(SignedDuration::from_nanos(1)).unwrap());
+        assert!(log.query(&until).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_query_reads_entries_written_by_the_chrono_era() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let log = AuditLog::new(temp_dir.path()).await.unwrap();
+
+        // The `chrono` implementation wrote `+00:00` offsets; those entries
+        // must still be readable and filterable.
+        let legacy = r#"{"id":"legacy","timestamp":"2025-11-20T21:35:03.123456+00:00","operation":"CREATE","path":"legacy.md","metadata":{}}"#;
+        let path = temp_dir.path().join(".turbovault/audit/operations.jsonl");
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&path, format!("{legacy}\n"))
+            .await
+            .unwrap();
+
+        let entries = log.query(&AuditFilter::new()).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "legacy.md");
+
+        let mut since = AuditFilter::new();
+        since.since = Some(parse_timestamp("2025-11-20T21:35:04Z").unwrap());
+        assert!(log.query(&since).await.unwrap().is_empty());
+
+        let mut until = AuditFilter::new();
+        until.until = Some(parse_timestamp("2025-11-20T21:35:04Z").unwrap());
+        assert_eq!(log.query(&until).await.unwrap().len(), 1);
     }
 }
