@@ -356,53 +356,6 @@ pub mod iso_date {
     }
 }
 
-/// Serde adapter that keeps the `chrono` wire shape for [`Timestamp`].
-///
-/// `jiff`'s built-in `Timestamp` impls render fractional seconds with trimmed
-/// trailing zeros (`...T22:15:03.1Z`). Applying this module to a field keeps
-/// the historical `chrono` shape (`...T22:15:03.100Z`):
-///
-/// ```
-/// use jiff::Timestamp;
-/// use serde::{Deserialize, Serialize};
-///
-/// #[derive(Serialize, Deserialize)]
-/// struct Entry {
-///     #[serde(with = "turbovault_core::datetime::serde_compat")]
-///     timestamp: Timestamp,
-/// }
-///
-/// let ts = Timestamp::from_second(1_763_674_503).unwrap();
-/// let json = serde_json::to_string(&Entry { timestamp: ts }).unwrap();
-/// assert_eq!(json, r#"{"timestamp":"2025-11-20T21:35:03Z"}"#);
-/// ```
-pub mod serde_compat {
-    use jiff::Timestamp;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    /// Serialize a timestamp in the chrono-compatible RFC 3339 shape.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the serializer fails.
-    pub fn serialize<S: Serializer>(
-        timestamp: &Timestamp,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&super::format_timestamp(*timestamp))
-    }
-
-    /// Deserialize a timestamp from an RFC 3339 string.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the string is not a valid RFC 3339 timestamp.
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Timestamp, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        raw.parse().map_err(serde::de::Error::custom)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -721,27 +674,5 @@ mod tests {
         );
         // Out of range years are rejected, like chrono did.
         assert_eq!(parse_iso_date("+99999999-01-31"), None);
-    }
-
-    #[test]
-    fn serde_adapter_keeps_the_chrono_shape() {
-        #[derive(serde::Serialize, serde::Deserialize)]
-        struct Entry {
-            #[serde(with = "serde_compat")]
-            timestamp: Timestamp,
-        }
-
-        let entry = Entry {
-            timestamp: timestamp(100_000_000),
-        };
-        let json = serde_json::to_string(&entry).unwrap();
-        assert_eq!(json, r#"{"timestamp":"2025-11-20T21:35:03.100Z"}"#);
-
-        let parsed: Entry = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.timestamp, entry.timestamp);
-
-        let from_chrono: Entry =
-            serde_json::from_str(r#"{"timestamp":"2025-11-20T21:35:03.100+00:00"}"#).unwrap();
-        assert_eq!(from_chrono.timestamp, entry.timestamp);
     }
 }

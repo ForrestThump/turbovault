@@ -34,9 +34,10 @@ crate root):
   accepted.
 * `parse_iso_date(&str) -> Option<jiff::civil::Date>` — ISO `YYYY-MM-DD`
   parsing with `chrono`'s lenient `%Y-%m-%d` semantics (one- or two-digit
-  month/day, leading whitespace tolerated).
-* `datetime::serde_compat` — serde adapter (`serialize` / `deserialize`) that
-  pins the `chrono` wire shape for any `jiff::Timestamp` field.
+  month/day, a signed year, leading whitespace tolerated).
+* `datetime::iso_date` — serde adapter for optional calendar dates, used by
+  `TaskItem`: it deserializes through `parse_iso_date` (so JSON accepts what
+  `chrono` accepted) and serializes the canonical `YYYY-MM-DD` spelling.
 
 ### `turbovault-audit`
 
@@ -83,8 +84,9 @@ Every serialized timestamp keeps the shape `chrono` produced:
 `jiff`'s own `Timestamp` rendering trims trailing zeros instead
 (`...T22:15:03.1Z`), so `turbovault_core::datetime::format_timestamp` is used
 for every timestamp that reaches a serde/API/disk boundary (audit log JSONL,
-export reports, tool responses, note metadata). `datetime::serde_compat` does
-the same for `Timestamp` fields that are serialized directly.
+export reports, tool responses, note metadata). Every timestamp in the
+workspace is stored as a string, so no `Timestamp` field is serialized
+directly and no serde adapter for one is needed.
 
 One deliberate difference: `chrono`'s `DateTime::to_rfc3339()` (used by the old
 code for the string fields) rendered the offset as `+00:00` instead of `Z`.
