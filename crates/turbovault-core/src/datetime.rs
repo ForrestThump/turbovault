@@ -91,24 +91,45 @@ pub fn parse_timestamp(raw: &str) -> Result<Timestamp, jiff::Error> {
 /// Parse an ISO `YYYY-MM-DD` calendar date.
 ///
 /// This keeps the lenient behavior of chrono's
-/// `NaiveDate::parse_from_str(raw, "%Y-%m-%d")`: one- or two-digit months and
-/// days are accepted and leading whitespace is ignored. `None` is returned
-/// for anything else, including trailing garbage.
+/// `NaiveDate::parse_from_str(raw, "%Y-%m-%d")`:
+///
+/// * the year is one to four digits, optionally signed (`+2026-01-31` and
+///   `-2026-01-31` are accepted, like chrono's signed `%Y`),
+/// * the month and the day are one or two digits without a sign
+///   (`2026-1-31` and `2026-01-1` are accepted, `2026-011-02`,
+///   `2026-01-031` and `2026-01-+1` are not),
+/// * leading whitespace is ignored.
+///
+/// `None` is returned for anything else, including trailing garbage.
 #[must_use]
 pub fn parse_iso_date(raw: &str) -> Option<Date> {
     let trimmed = raw.trim_start();
     let (negative, rest) = match trimmed.strip_prefix('-') {
         Some(rest) => (true, rest),
-        None => (false, trimmed),
+        None => (false, trimmed.strip_prefix('+').unwrap_or(trimmed)),
     };
 
     let mut parts = rest.split('-');
-    let year: i32 = parts.next()?.parse().ok()?;
-    let month: i32 = parts.next()?.parse().ok()?;
-    let day: i32 = parts.next()?.parse().ok()?;
+    let year_text = parts.next()?;
+    let month_text = parts.next()?;
+    let day_text = parts.next()?;
     if parts.next().is_some() {
         return None;
     }
+
+    // An unsigned year is at most four digits wide (chrono's `%Y` width); a
+    // signed one may carry more digits, which are range checked below.
+    let year_digits = year_text.as_bytes();
+    if year_digits.is_empty() || !year_digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    if !negative && year_digits.len() > 4 {
+        return None;
+    }
+    let year: i32 = year_text.parse().ok()?;
+
+    let month = parse_two_digits(month_text)?;
+    let day = parse_two_digits(day_text)?;
 
     let year = if negative { -year } else { year };
     Date::new(
@@ -117,6 +138,21 @@ pub fn parse_iso_date(raw: &str) -> Option<Date> {
         i8::try_from(day).ok()?,
     )
     .ok()
+}
+
+/// Parse a month or day field: one or two ASCII digits, without a sign.
+///
+/// This is the width chrono's `%m` and `%d` accepted — `2026-011-02` and
+/// `2026-01-031` were rejected there, and so are they here.
+fn parse_two_digits(text: &str) -> Option<i32> {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() || bytes.len() > 2 {
+        return None;
+    }
+    if !bytes.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    text.parse().ok()
 }
 
 /// Serde adapter that keeps the `chrono` wire shape for [`Timestamp`].
@@ -318,6 +354,51 @@ mod tests {
         assert_eq!(parse_iso_date("2026-01-31T00:00:00"), None);
         assert_eq!(parse_iso_date("2026-01-31 "), None);
         assert_eq!(parse_iso_date(""), None);
+    }
+
+    #[test]
+    fn rejects_month_and_day_fields_that_chrono_rejected() {
+        // Chrono's `%m` and `%d` were at most two digits wide and carried no
+        // sign, so these were rejected there and must be rejected here too.
+        assert_eq!(parse_iso_date("2026-011-02"), None);
+        assert_eq!(parse_iso_date("2026-01-031"), None);
+        assert_eq!(parse_iso_date("2026-01-+1"), None);
+        assert_eq!(parse_iso_date("2026-01- 1"), None);
+        // A leap day in a leap year is still accepted.
+        assert_eq!(
+            parse_iso_date("2024-02-29"),
+            Some(Date::new(2024, 2, 29).unwrap())
+        );
+        // The lenient single digit spellings stay accepted.
+        assert_eq!(
+            parse_iso_date("2026-1-31"),
+            Some(Date::new(2026, 1, 31).unwrap())
+        );
+        assert_eq!(
+            parse_iso_date("2026-01-1"),
+            Some(Date::new(2026, 1, 1).unwrap())
+        );
+    }
+
+    #[test]
+    fn parses_signed_years_like_chrono_did() {
+        // Chrono's `%Y` accepted an explicit sign.
+        assert_eq!(
+            parse_iso_date("+2026-01-31"),
+            Some(Date::new(2026, 1, 31).unwrap())
+        );
+        assert_eq!(
+            parse_iso_date("-2026-01-31"),
+            Some(Date::new(-2026, 1, 31).unwrap())
+        );
+        // An unsigned year is at most four digits wide.
+        assert_eq!(parse_iso_date("12345-01-31"), None);
+        assert_eq!(
+            parse_iso_date("0000-01-31"),
+            Some(Date::new(0, 1, 31).unwrap())
+        );
+        // Out of range years are rejected, like chrono did.
+        assert_eq!(parse_iso_date("+99999999-01-31"), None);
     }
 
     #[test]
