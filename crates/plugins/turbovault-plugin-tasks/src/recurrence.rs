@@ -113,6 +113,18 @@ mod tests {
         text.parse().unwrap()
     }
 
+    /// The time zone the daylight saving tests use.
+    ///
+    /// It is built from a POSIX rule (`CST6CDT` with the United States
+    /// transition rules — daylight saving starts on the second Sunday in
+    /// March and ends on the first Sunday in November) instead of a named
+    /// zone, so the tests do not depend on a system time zone database being
+    /// installed. For 2026 the transitions are 2026-03-08 and 2026-11-01, the
+    /// same days as `America/Chicago`.
+    fn posix_zone() -> TimeZone {
+        TimeZone::posix("CST6CDT,M3.2.0,M11.1.0").expect("the POSIX time zone rule is valid")
+    }
+
     #[test]
     fn every_day_advances_the_due_date() {
         let (due, _, _) = compute_next_occurrence(
@@ -382,9 +394,13 @@ mod tests {
     /// timeline, but not in the calendar arithmetic the recurrence uses: the
     /// spring-forward day is 23 hours long and the fall-back day is 25 hours
     /// long, while the recurrence still advances by exactly one day.
+    ///
+    /// The zone is built from a POSIX rule (`CST6CDT` with the United States
+    /// transition rules) instead of a named zone, so the test does not need a
+    /// system time zone database.
     #[test]
     fn daylight_saving_transitions_change_the_elapsed_time_not_the_day_count() {
-        let tz = TimeZone::get("America/Chicago").expect("America/Chicago must be known");
+        let tz = posix_zone();
 
         let before = DateTime::new(2026, 3, 8, 0, 0, 0, 0)
             .unwrap()
@@ -437,9 +453,12 @@ mod tests {
     /// on the fall-back day. Neither affects the calendar arithmetic, but the
     /// disambiguation is pinned here so a future switch to instant-based
     /// recurrence cannot silently change a due date.
+    ///
+    /// The zone is built from a POSIX rule instead of a named zone, so the
+    /// test does not need a system time zone database.
     #[test]
     fn ambiguous_and_nonexistent_local_times_are_disambiguated() {
-        let tz = TimeZone::get("America/Chicago").expect("America/Chicago must be known");
+        let tz = posix_zone();
 
         // 2026-03-08 02:30 does not exist: the clock jumps from 02:00 to 03:00.
         let gap = DateTime::new(2026, 3, 8, 2, 30, 0, 0).unwrap();
@@ -448,10 +467,7 @@ mod tests {
             .into_ambiguous_zoned(gap)
             .compatible()
             .expect("compatible disambiguation always resolves");
-        assert_eq!(
-            zoned.to_string(),
-            "2026-03-08T03:30:00-05:00[America/Chicago]"
-        );
+        assert_eq!(zoned.to_string(), "2026-03-08T03:30:00-05:00[-05:00]");
 
         // 2026-11-01 01:30 happens twice: the earlier (daylight saving) one is
         // picked by the compatible disambiguation.
@@ -461,19 +477,40 @@ mod tests {
             .into_ambiguous_zoned(ambiguous)
             .compatible()
             .expect("compatible disambiguation always resolves");
-        assert_eq!(
-            zoned.to_string(),
-            "2026-11-01T01:30:00-05:00[America/Chicago]"
-        );
+        assert_eq!(zoned.to_string(), "2026-11-01T01:30:00-05:00[-05:00]");
         let later = tz
             .clone()
             .into_ambiguous_zoned(DateTime::new(2026, 11, 1, 1, 30, 0, 0).unwrap())
             .later()
             .expect("later disambiguation always resolves");
-        assert_eq!(
-            later.to_string(),
-            "2026-11-01T01:30:00-06:00[America/Chicago]"
-        );
+        assert_eq!(later.to_string(), "2026-11-01T01:30:00-06:00[-06:00]");
+
+        // The plugin's own arithmetic is unaffected by either transition: the
+        // due date and the scheduled and start dates move by exactly one
+        // calendar day.
+        let (due, scheduled, start) = compute_next_occurrence(
+            "every day",
+            Some(date("2026-03-08")),
+            Some(date("2026-03-08")),
+            Some(date("2026-03-08")),
+            date("2026-03-08"),
+        )
+        .unwrap();
+        assert_eq!(due, Some(date("2026-03-09")));
+        assert_eq!(scheduled, Some(date("2026-03-09")));
+        assert_eq!(start, Some(date("2026-03-09")));
+
+        let (due, scheduled, start) = compute_next_occurrence(
+            "every day",
+            Some(date("2026-11-01")),
+            Some(date("2026-11-01")),
+            Some(date("2026-11-01")),
+            date("2026-11-01"),
+        )
+        .unwrap();
+        assert_eq!(due, Some(date("2026-11-02")));
+        assert_eq!(scheduled, Some(date("2026-11-02")));
+        assert_eq!(start, Some(date("2026-11-02")));
     }
 
     /// The recurrence itself is calendar math, so a task due on a transition
