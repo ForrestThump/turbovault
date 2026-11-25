@@ -173,6 +173,32 @@ impl ParseResult {
     }
 }
 
+/// One open Markdown list item, tracked while a document is parsed.
+///
+/// The Obsidian Tasks plugin is line-oriented: a task is the text of its own
+/// line. Tracking the list items as a stack keeps that guarantee — a nested
+/// item never joins the task above it, and a nested checkbox is a task of its
+/// own.
+#[derive(Debug, Default)]
+struct ListItemState {
+    /// Whether the item carries a checkbox.
+    is_task: bool,
+    /// Whether the task was already emitted (a nested task closes its parent).
+    emitted: bool,
+    /// The depth of the list the item lives in.
+    list_depth: usize,
+    /// The task built from the item's own text.
+    builder: TaskBuilder,
+}
+
+/// Emit the task of a list item, if it carries any text.
+fn emit_task(state: &mut ListItemState, result: &mut ParseResult) {
+    state.emitted = true;
+    if !state.builder.content.is_empty() {
+        result.tasks.push(state.builder.build());
+    }
+}
+
 // ============================================================================
 // Core parsing engine
 // ============================================================================
@@ -284,8 +310,11 @@ impl<'a> ParseEngine<'a> {
         let mut heading_text = String::new();
         let mut heading_start: usize = 0;
 
-        let mut in_task_item: bool = false;
-        let mut task_builder: TaskBuilder = TaskBuilder::default();
+        // List items are tracked as a stack. A task is the text of its own
+        // line: a nested list item must never join the task above it, and a
+        // nested checkbox is a task of its own.
+        let mut list_depth: usize = 0;
+        let mut item_stack: Vec<ListItemState> = Vec::new();
 
         let mut current_link: Option<(String, String)> = None; // (url, title)
         let mut link_text = String::new();
@@ -381,8 +410,38 @@ impl<'a> ParseEngine<'a> {
                 }
 
                 // === Tasks ===
+                Event::Start(Tag::List(_)) => {
+                    list_depth += 1;
+                }
+
+                Event::End(TagEnd::List(_)) => {
+                    list_depth = list_depth.saturating_sub(1);
+                }
+
+                Event::Start(Tag::Item) => {
+                    item_stack.push(ListItemState {
+                        list_depth,
+                        ..ListItemState::default()
+                    });
+                }
+
                 Event::TaskListMarker(_checked) if options.parse_tasks => {
-                    in_task_item = true;
+                    // A nested task is a task of its own: close the enclosing
+                    // one first so the two are not mashed into a single item.
+                    if let Some(index) = item_stack
+                        .iter()
+                        .rposition(|item| item.is_task && !item.emitted)
+                    {
+                        emit_task(&mut item_stack[index], &mut *result);
+                    }
+
+                    if item_stack.is_empty() {
+                        item_stack.push(ListItemState {
+                            list_depth,
+                            ..ListItemState::default()
+                        });
+                    }
+
                     // Read raw marker byte to detect extended states [/] [-]
                     let raw_marker = self
                         .content
@@ -391,24 +450,41 @@ impl<'a> ParseEngine<'a> {
                         .copied()
                         .unwrap_or(b' ') as char;
                     let status = crate::models::TaskStatus::from_marker(raw_marker);
-                    task_builder.status = status;
-                    task_builder.is_completed = status.is_completed();
-                    task_builder.position = SourcePosition::from_offset_indexed(
+                    let position = SourcePosition::from_offset_indexed(
                         &self.index,
                         task_line_start_for_marker(self.content, &self.index, range.start),
                         task_line_length_for_marker(self.content, &self.index, range.start),
                     );
-                }
-
-                Event::End(TagEnd::Item) if in_task_item => {
-                    in_task_item = false;
-                    if !task_builder.content.is_empty() {
-                        result.tasks.push(task_builder.build());
+                    if let Some(state) = item_stack.last_mut() {
+                        state.is_task = true;
+                        state.emitted = false;
+                        state.builder.status = status;
+                        state.builder.is_completed = status.is_completed();
+                        state.builder.position = position;
                     }
                 }
 
-                Event::Text(text) if in_task_item => {
-                    task_builder.content.push_str(&text);
+                Event::End(TagEnd::Item) => {
+                    if let Some(state) = item_stack.last_mut()
+                        && state.is_task
+                        && !state.emitted
+                    {
+                        emit_task(state, &mut *result);
+                    }
+                    item_stack.pop();
+                }
+
+                Event::Text(text)
+                    if item_stack.last().is_some_and(|state| {
+                        state.is_task && !state.emitted && state.list_depth == list_depth
+                    }) =>
+                {
+                    // Only the innermost item's own text belongs to a task, and
+                    // only at the item's own list depth: text inside a nested
+                    // list belongs to that list, not to the task above it.
+                    if let Some(state) = item_stack.last_mut() {
+                        state.builder.content.push_str(&text);
+                    }
                 }
 
                 // === Markdown Links ===
