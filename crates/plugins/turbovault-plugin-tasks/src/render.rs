@@ -53,13 +53,31 @@ pub fn render_body(task: &TaskItem, format: TaskFormat) -> String {
         parts.push(scalar(format, "🔁", "repeat", recurrence));
     }
 
-    parts.extend(dated(format, "➕", "created", task.created_date));
-    parts.extend(dated(format, "🛫", "start", task.start_date));
-    parts.extend(dated(format, "⏳", "scheduled", task.scheduled_date));
-    parts.extend(dated(format, "📅", "due", task.due_date));
-    parts.extend(dated(format, "❌", "cancelled", task.cancelled_date));
+    parts.extend(dated(format, "➕", "created", task.created_date, None));
+    parts.extend(dated(
+        format,
+        "🛫",
+        "start",
+        task.start_date,
+        task.start_time.as_deref(),
+    ));
+    parts.extend(dated(
+        format,
+        "⏳",
+        "scheduled",
+        task.scheduled_date,
+        task.scheduled_time.as_deref(),
+    ));
+    parts.extend(dated(
+        format,
+        "📅",
+        "due",
+        task.due_date,
+        task.due_time.as_deref(),
+    ));
+    parts.extend(dated(format, "❌", "cancelled", task.cancelled_date, None));
     // `completion` is the Tasks plugin's canonical dataview key for the done date.
-    parts.extend(dated(format, "✅", "completion", task.done_date));
+    parts.extend(dated(format, "✅", "completion", task.done_date, None));
 
     if let Some(on_completion) = &task.on_completion {
         parts.push(scalar(format, "🏁", "onCompletion", on_completion));
@@ -110,13 +128,59 @@ fn scalar(format: TaskFormat, emoji: &str, key: &str, value: &str) -> String {
 }
 
 /// An optional date field, rendered only when present.
+///
+/// A time of day is written the way the vault writes it: in the emoji dialect
+/// it follows the date behind its clock face (`📅 2026-11-07 🕘 09:00`), in
+/// the Dataview dialect it is an inline field of its own (`[dueTime:: 09:00]`).
 fn dated(
     format: TaskFormat,
     emoji: &str,
     key: &str,
     date: Option<jiff::civil::Date>,
+    time: Option<&str>,
 ) -> Option<String> {
-    date.map(|date| scalar(format, emoji, key, &date.to_string()))
+    let date = date?;
+    match (format, time) {
+        (TaskFormat::Emoji, Some(time)) => {
+            Some(format!("{emoji} {date} {} {time}", clock_face(time)))
+        }
+        (TaskFormat::Emoji, None) => Some(scalar(format, emoji, key, &date.to_string())),
+        (TaskFormat::Dataview, Some(time)) => {
+            Some(format!("[{}:: {date}] [{}Time:: {time}]", key, key))
+        }
+        (TaskFormat::Dataview, None) => Some(scalar(format, emoji, key, &date.to_string())),
+    }
+}
+
+/// The clock-face emoji for a time of day, e.g. `09:00` → `🕘`.
+///
+/// Times are written in the vault with the twelve-hour clock face that matches
+/// the hour (`🕖 19:00`), and the renderer reproduces that spelling.
+fn clock_face(time: &str) -> &'static str {
+    /// The o'clock faces, indexed by the hour modulo twelve.
+    const OCLOCK: [&str; 12] = [
+        "🕛", "🕐", "🕑", "🕒", "🕓", "🕔", "🕕", "🕖", "🕗", "🕘", "🕙", "🕚",
+    ];
+    /// The half-past faces, indexed by the hour modulo twelve.
+    const HALF_PAST: [&str; 12] = [
+        "🕧", "🕜", "🕝", "🕞", "🕟", "🕠", "🕡", "🕢", "🕣", "🕤", "🕥", "🕦",
+    ];
+
+    let mut fields = time.split(':');
+    let hour: u32 = fields
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let minute: u32 = fields
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let index = (hour % 12) as usize;
+    if minute == 30 {
+        HALF_PAST[index]
+    } else {
+        OCLOCK[index]
+    }
 }
 
 /// Standard Tasks metadata keys (as the parser normalizes them). These are
@@ -138,6 +202,9 @@ fn is_standard_key(key: &str) -> bool {
             | "id"
             | "dependson"
             | "priority"
+            | "duetime"
+            | "scheduledtime"
+            | "starttime"
     )
 }
 
@@ -216,6 +283,18 @@ mod tests {
             original.block_ref, reparsed.block_ref,
             "block_ref ({rendered:?})"
         );
+        assert_eq!(
+            original.due_time, reparsed.due_time,
+            "due_time ({rendered:?})"
+        );
+        assert_eq!(
+            original.scheduled_time, reparsed.scheduled_time,
+            "scheduled_time ({rendered:?})"
+        );
+        assert_eq!(
+            original.start_time, reparsed.start_time,
+            "start_time ({rendered:?})"
+        );
         // Standard fields are compared via the typed fields above; the parser
         // also mirrors them into `metadata` under whatever alias the author used
         // (e.g. `completion` vs `done`), which is redundant and not semantically
@@ -244,6 +323,8 @@ mod tests {
             "- [-] Dropped 📅 2026-05-15",
             "- [ ] Blocked 🏁 keep 🆔 dcf64c ⛔ abc123,def456",
             "- [ ] Bare description with no metadata",
+            "- [ ] Cancel SuperGrok subscription 📅 2026-11-07 🕘 09:00 #task #finance",
+            "- [ ] Take out the trash 📅 2026-11-14 1:20 #task",
         ] {
             assert_round_trips(line, TaskFormat::Emoji);
         }
@@ -255,9 +336,40 @@ mod tests {
             "- [ ] Finish report [due:: 2026-06-01] [priority:: high] #work",
             "- [x] Ship it [completion:: 2026-07-01] [repeat:: every month]",
             "- [ ] Custom [project:: [[Team Work]]] [due:: 2026-05-20]",
+            "- [ ] Cancel SuperGrok subscription [due:: 2026-11-07] [dueTime:: 09:00] #task",
         ] {
             assert_round_trips(line, TaskFormat::Dataview);
         }
+    }
+
+    /// A time of day is written back the way the vault writes it: behind the
+    /// twelve-hour clock face that matches the hour.
+    #[test]
+    fn renders_a_clock_time_next_to_its_date() {
+        let task = parse_tasks("- [ ] Cancel SuperGrok subscription 📅 2026-11-07 🕘 09:00 #task")
+            .into_iter()
+            .next()
+            .unwrap();
+
+        assert_eq!(task.due_time.as_deref(), Some("09:00"));
+        assert_eq!(
+            to_markdown_line(&task, TaskFormat::Emoji),
+            "- [ ] Cancel SuperGrok subscription 📅 2026-11-07 🕘 09:00 #task"
+        );
+    }
+
+    #[test]
+    fn renders_an_evening_clock_time_with_its_twelve_hour_face() {
+        let task = parse_tasks("- [ ] Call the clinic 📅 2026-11-07 🕖 19:00")
+            .into_iter()
+            .next()
+            .unwrap();
+
+        assert_eq!(task.due_time.as_deref(), Some("19:00"));
+        assert_eq!(
+            to_markdown_line(&task, TaskFormat::Emoji),
+            "- [ ] Call the clinic 📅 2026-11-07 🕖 19:00"
+        );
     }
 
     /// Format is a rendering choice, not a property of the source: an

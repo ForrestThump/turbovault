@@ -309,6 +309,18 @@ pub struct TaskItem {
     pub done_date: Option<Date>,
     #[serde(default, with = "crate::datetime::iso_date")]
     pub cancelled_date: Option<Date>,
+    /// Time of day belonging to the due date, e.g. `09:00`.
+    ///
+    /// Optional and additive: it never replaces [`due_date`](Self::due_date),
+    /// which stays a plain calendar date.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_time: Option<String>,
+    /// Time of day belonging to the scheduled date, e.g. `09:00`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_time: Option<String>,
+    /// Time of day belonging to the start date, e.g. `09:00`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<String>,
     #[serde(default)]
     pub priority: TaskPriority,
     /// Recurrence rule text, for example `every weekday`.
@@ -360,6 +372,9 @@ impl TaskItem {
             due_date: parse_date_opt(parsed.due.as_deref()),
             done_date: parse_date_opt(parsed.done.as_deref()),
             cancelled_date: parse_date_opt(parsed.cancelled.as_deref()),
+            due_time: parsed.due_time,
+            scheduled_time: parsed.scheduled_time,
+            start_time: parsed.start_time,
             priority: parsed
                 .priority
                 .and_then(TaskPriority::from_char)
@@ -1032,6 +1047,9 @@ mod tests {
                 done: None,
                 cancelled: None,
                 created: Some("2026-04-28".to_string()),
+                due_time: Some("09:00".to_string()),
+                scheduled_time: None,
+                start_time: None,
                 priority: Some('⏫'),
                 recurrence: Some("every weekday".to_string()),
                 on_completion: Some("delete".to_string()),

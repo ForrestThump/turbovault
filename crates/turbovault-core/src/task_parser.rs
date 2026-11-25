@@ -43,6 +43,13 @@ const PRIORITY_MEDIUM_EMOJI: &str = "🔼";
 const PRIORITY_LOW_EMOJI: &str = "🔽";
 const PRIORITY_LOWEST_EMOJI: &str = "⏬";
 
+/// First clock-face emoji (`🕐`, one o'clock).
+const CLOCK_FACE_FIRST: char = '\u{1F550}';
+/// Last clock-face emoji (`🕧`, half past twelve).
+const CLOCK_FACE_LAST: char = '\u{1F567}';
+/// The variation selector some keyboards append to an emoji.
+const VARIATION_SELECTOR_16: char = '\u{FE0F}';
+
 /// Parsed content and trailing metadata for an Obsidian task.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParsedTaskMetadata {
@@ -53,6 +60,12 @@ pub struct ParsedTaskMetadata {
     pub done: Option<String>,
     pub cancelled: Option<String>,
     pub created: Option<String>,
+    /// Time of day belonging to the due date, e.g. `09:00`.
+    pub due_time: Option<String>,
+    /// Time of day belonging to the scheduled date, e.g. `09:00`.
+    pub scheduled_time: Option<String>,
+    /// Time of day belonging to the start date, e.g. `09:00`.
+    pub start_time: Option<String>,
     pub priority: Option<char>,
     pub recurrence: Option<String>,
     pub on_completion: Option<String>,
@@ -61,6 +74,21 @@ pub struct ParsedTaskMetadata {
     pub tags: Vec<String>,
     pub block_ref: Option<String>,
     pub metadata: HashMap<String, String>,
+}
+
+impl ParsedTaskMetadata {
+    /// Whether the metadata carries a date a time of day can belong to.
+    fn has_time_bearing_date(&self) -> bool {
+        self.due.is_some() || self.scheduled.is_some() || self.start.is_some()
+    }
+}
+
+/// The date fields a time of day can belong to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DateField {
+    Due,
+    Scheduled,
+    Start,
 }
 
 /// A parsed Obsidian task line.
@@ -76,6 +104,12 @@ pub struct Task {
     pub done: Option<String>,
     pub cancelled: Option<String>,
     pub created: Option<String>,
+    /// Time of day belonging to the due date, e.g. `09:00`.
+    pub due_time: Option<String>,
+    /// Time of day belonging to the scheduled date, e.g. `09:00`.
+    pub scheduled_time: Option<String>,
+    /// Time of day belonging to the start date, e.g. `09:00`.
+    pub start_time: Option<String>,
     pub priority: Option<char>,
     pub recurrence: Option<String>,
     pub on_completion: Option<String>,
@@ -111,6 +145,9 @@ pub fn parse_task_line(input: &str) -> Result<Task, String> {
         done: parsed.done,
         cancelled: parsed.cancelled,
         created: parsed.created,
+        due_time: parsed.due_time,
+        scheduled_time: parsed.scheduled_time,
+        start_time: parsed.start_time,
         priority: parsed.priority,
         recurrence: parsed.recurrence,
         on_completion: parsed.on_completion,
@@ -175,9 +212,13 @@ fn is_pure_metadata(s: &str) -> bool {
     let mut input = s;
     let mut seen_priority = false;
     let mut seen_item = false;
+    let mut seen_date = false;
+    let mut seen_time = false;
     loop {
         if input.is_empty() {
-            return seen_item;
+            // A clock time only belongs to a metadata section that also
+            // carries a date; on its own it stays part of the description.
+            return seen_item && (!seen_time || seen_date);
         }
 
         if consume_metadata_separator(&mut input).is_err() {
@@ -187,11 +228,17 @@ fn is_pure_metadata(s: &str) -> bool {
         match parse_one_metadata_item(&mut input) {
             Ok(item) => {
                 seen_item = true;
-                if item.priority.is_some() {
+                if item.time.is_some() {
+                    seen_time = true;
+                }
+                if item.fields.priority.is_some() {
                     if seen_priority {
                         return false;
                     }
                     seen_priority = true;
+                }
+                if item.fields.has_time_bearing_date() {
+                    seen_date = true;
                 }
             }
             Err(_) => return false,
@@ -202,6 +249,10 @@ fn is_pure_metadata(s: &str) -> bool {
 fn parse_metadata_section(meta_str: &str) -> ParsedTaskMetadata {
     let mut result = ParsedTaskMetadata::default();
     let mut input = meta_str;
+    // A time of day may sit before or after the date it belongs to, so it is
+    // held back until the date is known.
+    let mut pending_time: Option<String> = None;
+    let mut last_date: Option<DateField> = None;
 
     loop {
         if input.is_empty() {
@@ -213,7 +264,22 @@ fn parse_metadata_section(meta_str: &str) -> ParsedTaskMetadata {
         }
 
         match parse_one_metadata_item(&mut input) {
-            Ok(item) => merge_metadata(&mut result, item),
+            Ok(item) => {
+                if let Some(time) = item.time {
+                    match last_date {
+                        Some(field) => set_date_time(&mut result, field, &time),
+                        None => pending_time = Some(time),
+                    }
+                }
+                let fields = item.fields;
+                if let Some(field) = date_field_of(&fields) {
+                    if let Some(time) = pending_time.take() {
+                        set_date_time(&mut result, field, &time);
+                    }
+                    last_date = Some(field);
+                }
+                merge_metadata(&mut result, fields);
+            }
             Err(_) => break,
         }
     }
@@ -232,7 +298,28 @@ fn consume_metadata_separator(input: &mut &str) -> ModalResult<()> {
     Ok(())
 }
 
-fn parse_one_metadata_item(input: &mut &str) -> ModalResult<ParsedTaskMetadata> {
+/// One item of the trailing metadata section.
+struct MetadataItem {
+    /// The fields the item carries (empty for a bare time of day).
+    fields: ParsedTaskMetadata,
+    /// A time of day, e.g. `🕘 09:00`, that is not attached to a date yet.
+    time: Option<String>,
+}
+
+impl MetadataItem {
+    /// An item that only carries a time of day.
+    fn with_time(time: String) -> Self {
+        Self {
+            fields: ParsedTaskMetadata::default(),
+            time: Some(time),
+        }
+    }
+}
+
+fn parse_one_metadata_item(input: &mut &str) -> ModalResult<MetadataItem> {
+    if let Ok(time) = parse_clock_time(input) {
+        return Ok(MetadataItem::with_time(time));
+    }
     alt((
         parse_emoji_date_field,
         parse_recurrence_field,
@@ -245,6 +332,7 @@ fn parse_one_metadata_item(input: &mut &str) -> ModalResult<ParsedTaskMetadata> 
         parse_block_ref_field,
     ))
     .parse_next(input)
+    .map(|fields| MetadataItem { fields, time: None })
 }
 
 fn parse_emoji_date_field(input: &mut &str) -> ModalResult<ParsedTaskMetadata> {
@@ -262,7 +350,147 @@ fn parse_emoji_date_field(input: &mut &str) -> ModalResult<ParsedTaskMetadata> {
 
     let mut meta = ParsedTaskMetadata::default();
     set_standard_field(&mut meta, key, value.trim());
+
+    // A time of day may follow the date, written either as a clock face
+    // (`🕘 09:00`) or bare (`09:00`).
+    if let Some(field) = date_field_of(&meta)
+        && let Some(time) = take_optional_time(input)
+    {
+        set_date_time(&mut meta, field, &time);
+    }
     Ok(meta)
+}
+
+/// Parse a clock-face time (`🕘 09:00`).
+///
+/// The input is left untouched when it does not start with a clock face, or
+/// when the clock face is not followed by a time.
+fn parse_clock_time(input: &mut &str) -> ModalResult<String> {
+    let start = *input;
+    if !consume_clock_face(input) {
+        return Err(ErrMode::Backtrack(ContextError::new()));
+    }
+    let trimmed = input.trim_start();
+    *input = trimmed;
+    match take_time_value(input) {
+        Some(value) => Ok(value),
+        None => {
+            *input = start;
+            Err(ErrMode::Backtrack(ContextError::new()))
+        }
+    }
+}
+
+/// Whether `s` starts with a clock-face emoji, optionally followed by the
+/// variation selector.
+fn starts_clock_face(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    matches!(first, CLOCK_FACE_FIRST..=CLOCK_FACE_LAST)
+}
+
+/// Consume a clock-face emoji, reporting whether one was there.
+fn consume_clock_face(input: &mut &str) -> bool {
+    let mut chars = input.char_indices();
+    let Some((_, first)) = chars.next() else {
+        return false;
+    };
+    if !matches!(first, CLOCK_FACE_FIRST..=CLOCK_FACE_LAST) {
+        return false;
+    }
+    let mut end = first.len_utf8();
+    if let Some((index, next)) = chars.next() {
+        // The variation selector is optional; when it is there, it belongs to
+        // the emoji.
+        if next == VARIATION_SELECTOR_16 {
+            end = index + next.len_utf8();
+        }
+    }
+    *input = &input[end..];
+    true
+}
+
+/// Take a `H:MM`/`HH:MM` time value, normalized to `HH:MM`.
+///
+/// The input is left untouched when the text is not a time of day.
+fn take_time_value(input: &mut &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    let hour_digits = index;
+    if !(1..=2).contains(&hour_digits) {
+        return None;
+    }
+    if bytes.get(index) != Some(&b':') {
+        return None;
+    }
+    index += 1;
+    let minute_start = index;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    if index - minute_start != 2 {
+        return None;
+    }
+    let hour: u32 = input[..hour_digits].parse().ok()?;
+    let minute: u32 = input[minute_start..index].parse().ok()?;
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    *input = &input[index..];
+    Some(format!("{hour:02}:{minute:02}"))
+}
+
+/// Take the time of day that directly follows a date field.
+///
+/// Both spellings are accepted: a clock face (`🕘 09:00`) and a bare
+/// `H:MM`/`HH:MM`. The input is left untouched when there is no time.
+fn take_optional_time(input: &mut &str) -> Option<String> {
+    let trimmed = input.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if starts_clock_face(trimmed) {
+        let mut rest = trimmed;
+        consume_clock_face(&mut rest);
+        rest = rest.trim_start();
+        let value = take_time_value(&mut rest)?;
+        *input = rest;
+        return Some(value);
+    }
+    let mut rest = trimmed;
+    let value = take_time_value(&mut rest)?;
+    *input = rest;
+    Some(value)
+}
+
+/// The date field a parsed metadata item carries, if any.
+fn date_field_of(meta: &ParsedTaskMetadata) -> Option<DateField> {
+    if meta.due.is_some() {
+        Some(DateField::Due)
+    } else if meta.scheduled.is_some() {
+        Some(DateField::Scheduled)
+    } else if meta.start.is_some() {
+        Some(DateField::Start)
+    } else {
+        None
+    }
+}
+
+/// Attach a time of day to the date field it belongs to.
+fn set_date_time(meta: &mut ParsedTaskMetadata, field: DateField, time: &str) {
+    let slot = match field {
+        DateField::Due => &mut meta.due_time,
+        DateField::Scheduled => &mut meta.scheduled_time,
+        DateField::Start => &mut meta.start_time,
+    };
+    if slot.is_none() {
+        *slot = Some(time.to_string());
+    }
 }
 
 fn parse_recurrence_field(input: &mut &str) -> ModalResult<ParsedTaskMetadata> {
@@ -457,6 +685,7 @@ fn starts_metadata_token(s: &str) -> bool {
         || s.starts_with(ID_EMOJI)
         || s.starts_with(DEPENDS_ON_EMOJI)
         || is_priority_metadata_start(s)
+        || starts_clock_face(s)
         || s.starts_with('#')
         || s.starts_with('^')
         || ((s.starts_with('[') || s.starts_with('(')) && s.contains("::"))
@@ -494,6 +723,9 @@ fn set_standard_field(meta: &mut ParsedTaskMetadata, key: &str, value: &str) {
         "id" => meta.id = Some(value.to_string()),
         "dependson" => meta.depends_on = split_dependency_ids(value),
         "priority" => meta.priority = priority_from_dataview_value(value),
+        "duetime" => meta.due_time = Some(value.to_string()),
+        "scheduledtime" => meta.scheduled_time = Some(value.to_string()),
+        "starttime" => meta.start_time = Some(value.to_string()),
         _ => {}
     }
 }
@@ -537,6 +769,15 @@ fn merge_metadata(dst: &mut ParsedTaskMetadata, src: ParsedTaskMetadata) {
     }
     if src.created.is_some() {
         dst.created = src.created;
+    }
+    if src.due_time.is_some() {
+        dst.due_time = src.due_time;
+    }
+    if src.scheduled_time.is_some() {
+        dst.scheduled_time = src.scheduled_time;
+    }
+    if src.start_time.is_some() {
+        dst.start_time = src.start_time;
     }
     if src.priority.is_some() {
         dst.priority = src.priority;
@@ -725,5 +966,86 @@ mod tests {
         let task = parse_task_line("- [ ] Decide recurrence 🔁").unwrap();
         assert_eq!(task.description, "Decide recurrence 🔁");
         assert!(task.recurrence.is_none());
+    }
+
+    // --- Clock-time conventions ---------------------------------------------
+    //
+    // Forrest writes times as a clock-face emoji plus `HH:MM` (or a bare
+    // `HH:MM` right after a date). Those tokens must not break the parsing of
+    // the dates around them.
+
+    #[test]
+    fn parses_a_due_date_followed_by_a_clock_time() {
+        let task = parse_task_line(
+            "- [ ] Cancel SuperGrok subscription 📅 2026-11-07 🕘 09:00 #task #finance #personal-admin",
+        )
+        .unwrap();
+        assert_eq!(task.description, "Cancel SuperGrok subscription");
+        assert_eq!(task.due.as_deref(), Some("2026-11-07"));
+        assert_eq!(task.due_time.as_deref(), Some("09:00"));
+        assert_eq!(
+            task.tags,
+            vec![
+                "task".to_string(),
+                "finance".to_string(),
+                "personal-admin".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_a_due_date_preceded_by_a_clock_time() {
+        let task = parse_task_line(
+            "- [ ] Cancel SuperGrok subscription 🕘 09:00 📅 2026-11-07 #task #finance #personal-admin",
+        )
+        .unwrap();
+        assert_eq!(task.description, "Cancel SuperGrok subscription");
+        assert_eq!(task.due.as_deref(), Some("2026-11-07"));
+        assert_eq!(task.due_time.as_deref(), Some("09:00"));
+        assert_eq!(
+            task.tags,
+            vec![
+                "task".to_string(),
+                "finance".to_string(),
+                "personal-admin".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_a_noon_clock_after_and_before_the_due_date() {
+        let after = parse_task_line("- [ ] Noon 📅 2026-12-01 🕛 12:00 #task").unwrap();
+        assert_eq!(after.due.as_deref(), Some("2026-12-01"));
+        assert_eq!(after.due_time.as_deref(), Some("12:00"));
+
+        let before = parse_task_line("- [ ] Noon 🕛 12:00 📅 2026-12-01 #task").unwrap();
+        assert_eq!(before.due.as_deref(), Some("2026-12-01"));
+        assert_eq!(before.due_time.as_deref(), Some("12:00"));
+    }
+
+    #[test]
+    fn parses_a_bare_time_after_the_due_date() {
+        let task = parse_task_line("- [ ] Take out the trash 📅 2026-11-14 1:20 #task").unwrap();
+        assert_eq!(task.description, "Take out the trash");
+        assert_eq!(task.due.as_deref(), Some("2026-11-14"));
+        assert_eq!(task.due_time.as_deref(), Some("01:20"));
+        assert_eq!(task.tags, vec!["task".to_string()]);
+    }
+
+    #[test]
+    fn keeps_a_clock_time_that_has_no_date_in_the_description() {
+        let task = parse_task_line("- [ ] Meet the team 🕘 09:00 #task").unwrap();
+        assert_eq!(task.description, "Meet the team 🕘 09:00");
+        assert!(task.due.is_none());
+        assert!(task.due_time.is_none());
+        assert_eq!(task.tags, vec!["task".to_string()]);
+    }
+
+    #[test]
+    fn does_not_treat_a_bare_time_in_prose_as_metadata() {
+        let task = parse_task_line("- [ ] Meet at 9:00 with the team").unwrap();
+        assert_eq!(task.description, "Meet at 9:00 with the team");
+        assert!(task.due.is_none());
+        assert!(task.due_time.is_none());
     }
 }
