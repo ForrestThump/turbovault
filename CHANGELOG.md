@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`chrono` replaced by `jiff`** ([JIFF_MIGRATION.md](JIFF_MIGRATION.md)): The workspace no longer depends on `chrono` directly. `TaskItem`'s date fields (`created_date`, `scheduled_date`, `start_date`, `due_date`, `done_date`, `cancelled_date`) are `jiff::civil::Date` instead of `chrono::NaiveDate`, and `AuditFilter::since`, `AuditFilter::until` and `AuditFilter::with_since` take a `jiff::Timestamp` instead of a `chrono::DateTime<Utc>`. The wire format is unchanged — timestamps stay RFC 3339 UTC (`2026-11-20T22:15:03.123456Z`) and calendar dates stay `YYYY-MM-DD` — and the full list of changes and of the remaining transitive `chrono` is in [JIFF_MIGRATION.md](JIFF_MIGRATION.md).
 
+### Fixed
+
+- **Global filter matches the raw task line**: `TasksConfig::accepts` checked only the *parsed* tags, so a task whose trailing text (`— see [[Some Note]]`) kept the rest of the line from being parsed as metadata was dropped from `tasks_list` even though it carried the `#task` filter. The filter is now matched against the raw task body, the way the Obsidian Tasks plugin does it, before the signifiers are parsed. A `#tag` filter still matches a whitespace-delimited token only (`#task` does not match `#tasks` or `#taskforce`).
+- **Nested list items no longer join the task above them**: the document parser tracked a single "in a task item" flag, so an indented sub-bullet was appended to the parent task and the first `End(Item)` flushed the wrong item. List items are now tracked as a stack: a nested bullet leaves the parent task alone, and a nested checkbox becomes a task of its own (as the Obsidian Tasks plugin, which is line-oriented, does).
+- **A clock time no longer clears the date next to it**: `📅 2026-11-07 🕘 09:00` (and the bare `📅 2026-11-14 1:20`) were not metadata tokens, so the trailing metadata run was rejected and the due date was lost — the task showed up without a due date and never counted as overdue. Clock-face times and a time directly after a date are recognized now and are attached to the date they belong to, before or after it. The time is additive: `TaskItem` gained `due_time`, `scheduled_time` and `start_time` (`null`/absent when there is no time), and the date fields are unchanged — `due_date` stays a `YYYY-MM-DD` calendar date.
+
 ## [1.6.0] - 2026-07-17
 
 ### Added
