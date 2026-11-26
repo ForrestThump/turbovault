@@ -134,7 +134,10 @@ fn scalar(format: TaskFormat, emoji: &str, key: &str, value: &str) -> String {
 /// the Dataview dialect it is an inline field of its own (`[dueTime:: 09:00]`).
 ///
 /// A time without a date is still a time: it is rendered on its own, so that
-/// re-rendering a task never drops it.
+/// re-rendering a task never drops it. It is written as an inline field in
+/// *both* dialects, because a clock face with no date next to it is
+/// description text for the parser (`🕘 09:00` stays in the description) and
+/// would therefore neither round-trip nor keep the description clean.
 fn dated(
     format: TaskFormat,
     emoji: &str,
@@ -148,10 +151,7 @@ fn dated(
             TaskFormat::Dataview => Some(format!("[{}:: {date}] [{}Time:: {time}]", key, key)),
         },
         (Some(date), None) => Some(scalar(format, emoji, key, &date.to_string())),
-        (None, Some(time)) => Some(match format {
-            TaskFormat::Emoji => format!("{} {time}", clock_face(time)),
-            TaskFormat::Dataview => format!("[{key}Time:: {time}]"),
-        }),
+        (None, Some(time)) => Some(format!("[{key}Time:: {time}]")),
         (None, None) => None,
     }
 }
@@ -329,7 +329,9 @@ mod tests {
             "- [ ] Bare description with no metadata",
             "- [ ] Cancel SuperGrok subscription 📅 2026-11-07 🕘 09:00 #task #finance",
             "- [ ] Take out the trash 📅 2026-11-14 1:20 #task",
-            "- [ ] Standup 🕘 09:00 #task",
+            // A time with no date has no clock-face spelling that survives a
+            // re-parse, so it is written as an inline field here too.
+            "- [ ] Standup [dueTime:: 09:00] #task",
         ] {
             assert_round_trips(line, TaskFormat::Emoji);
         }
@@ -396,8 +398,58 @@ mod tests {
         );
         assert_eq!(
             to_markdown_line(&task, TaskFormat::Emoji),
-            "- [ ] Standup 🕘 09:00 #task"
+            "- [ ] Standup [dueTime:: 09:00] #task"
         );
+    }
+
+    /// A clock face with no date next to it is description text, not metadata:
+    /// the parser keeps `🕘 09:00` in the description unless a date carries
+    /// it. A date-less time is therefore written as an inline field in *both*
+    /// dialects, so that it survives the round trip through the emoji dialect
+    /// instead of being dropped or leaking into the description.
+    #[test]
+    fn renders_a_date_less_time_as_an_inline_field_in_the_emoji_dialect() {
+        let task = parse_tasks("- [ ] Standup [dueTime:: 09:00] #task")
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(task.due_time.as_deref(), Some("09:00"));
+
+        let rendered = to_markdown_line(&task, TaskFormat::Emoji);
+        assert!(rendered.contains("[dueTime:: 09:00]"), "{rendered}");
+
+        let reparsed = parse_tasks(&rendered).into_iter().next().unwrap();
+        assert_eq!(reparsed.due_time.as_deref(), Some("09:00"));
+        assert_eq!(reparsed.content, "Standup");
+    }
+
+    /// Every date-less time is written the same way, whichever date it would
+    /// have belonged to.
+    #[test]
+    fn renders_every_date_less_time_as_an_inline_field() {
+        for (key, line) in [
+            ("dueTime", "- [ ] Standup [dueTime:: 09:00] #task"),
+            (
+                "scheduledTime",
+                "- [ ] Standup [scheduledTime:: 09:00] #task",
+            ),
+            ("startTime", "- [ ] Standup [startTime:: 09:00] #task"),
+        ] {
+            let task = parse_tasks(line).into_iter().next().unwrap();
+            let rendered = to_markdown_line(&task, TaskFormat::Emoji);
+            let inline = format!("[{key}:: 09:00]");
+            assert!(rendered.contains(&inline), "{rendered}");
+
+            let reparsed = parse_tasks(&rendered).into_iter().next().unwrap();
+            assert_eq!(reparsed.content, "Standup", "{rendered}");
+            let time = match key {
+                "dueTime" => reparsed.due_time.as_deref(),
+                "scheduledTime" => reparsed.scheduled_time.as_deref(),
+                "startTime" => reparsed.start_time.as_deref(),
+                other => unreachable!("unexpected key {other}"),
+            };
+            assert_eq!(time, Some("09:00"), "{rendered}");
+        }
     }
 
     /// Format is a rendering choice, not a property of the source: an

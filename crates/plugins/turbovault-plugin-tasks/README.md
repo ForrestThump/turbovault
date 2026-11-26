@@ -100,8 +100,10 @@ in the description.
 In the emoji dialect a time is written back behind the twelve-hour clock face
 that matches the hour (`📅 2026-11-07 🕖 19:00`); in the Dataview dialect it is
 an inline field of its own (`[due:: 2026-11-07] [dueTime:: 19:00]`). A time
-that has no date is written on its own (`🕖 19:00`, `[dueTime:: 19:00]`)
-rather than dropped.
+that has no date is written as an inline field of its own in both dialects
+(`[dueTime:: 19:00]`) rather than dropped: a clock face with no date next to
+it is description text for the parser (`🕘 19:00` stays in the description),
+so it could not survive the round trip.
 
 > **Note:** `VaultApi::read_config` is a fork-local addition to the plugin API
 > (a non-breaking default method, `None` where a host declines it). It is the

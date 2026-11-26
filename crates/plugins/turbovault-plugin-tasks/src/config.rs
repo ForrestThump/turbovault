@@ -359,6 +359,17 @@ mod tests {
         assert!(!config.accepts(&task_line("- [ ] Grouped #taskforce — see [[X]]")));
         assert!(!config.accepts(&task_line("- [ ] Grouped #task/sub — see [[X]]")));
         assert!(!config.accepts(&task_line("- [ ] Grouped #tasks — see [[X]]")));
+        // The longer tokens are not the filter tag, and the trailing text
+        // keeps them out of the parsed tags as well: these negatives stay on
+        // the raw path.
+        for line in [
+            "- [ ] Grouped #taskforce — see [[X]]",
+            "- [ ] Grouped #task/sub — see [[X]]",
+            "- [ ] Grouped #tasks — see [[X]]",
+        ] {
+            let task = task_line(line);
+            assert!(task.tags.is_empty(), "{line}");
+        }
     }
 
     /// The control for the case above: the very same shape with the filter tag
