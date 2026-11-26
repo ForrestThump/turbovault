@@ -54,6 +54,32 @@ fn a_bare_time_after_the_date_keeps_the_due_date() {
     assert_eq!(tasks[0].tags, vec!["task".to_string()]);
 }
 
+/// A bare `H:MM` is a metadata item in its own right: it does not have to sit
+/// immediately behind a date to belong to one.
+#[test]
+fn a_bare_time_after_the_tags_keeps_the_due_date() {
+    let content = "- [ ] Take out the trash 📅 2026-11-07 #task 1:20";
+    let tasks = parse_tasks(content);
+
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].content, "Take out the trash");
+    assert_eq!(due_date(&tasks[0]).as_deref(), Some("2026-11-07"));
+    assert_eq!(tasks[0].due_time.as_deref(), Some("01:20"));
+    assert_eq!(tasks[0].tags, vec!["task".to_string()]);
+}
+
+#[test]
+fn a_bare_time_before_the_date_keeps_the_due_date() {
+    let content = "- [ ] Take out the trash 1:20 📅 2026-11-07 #task";
+    let tasks = parse_tasks(content);
+
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].content, "Take out the trash");
+    assert_eq!(due_date(&tasks[0]).as_deref(), Some("2026-11-07"));
+    assert_eq!(tasks[0].due_time.as_deref(), Some("01:20"));
+    assert_eq!(tasks[0].tags, vec!["task".to_string()]);
+}
+
 #[test]
 fn a_clock_time_after_the_tags_keeps_the_due_date() {
     let content = "- [ ] Take out the trash 📅 2026-11-07 #task 🕘 09:00";

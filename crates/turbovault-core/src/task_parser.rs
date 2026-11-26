@@ -190,7 +190,7 @@ fn find_metadata_start(content: &str) -> usize {
         } else if !in_word {
             in_word = true;
             let rest = &content[i..];
-            if starts_metadata_token(rest)
+            if (starts_metadata_token(rest) || starts_bare_time(rest))
                 && !previous_token_is_priority(&content[..i])
                 && is_pure_metadata(rest)
             {
@@ -216,7 +216,7 @@ fn is_pure_metadata(s: &str) -> bool {
     let mut seen_time = false;
     loop {
         if input.is_empty() {
-            // A clock time only belongs to a metadata section that also
+            // A time of day only belongs to a metadata section that also
             // carries a date; on its own it stays part of the description.
             return seen_item && (!seen_time || seen_date);
         }
@@ -320,6 +320,9 @@ fn parse_one_metadata_item(input: &mut &str) -> ModalResult<MetadataItem> {
     if let Ok(time) = parse_clock_time(input) {
         return Ok(MetadataItem::with_time(time));
     }
+    if let Ok(time) = parse_bare_time(input) {
+        return Ok(MetadataItem::with_time(time));
+    }
     alt((
         parse_emoji_date_field,
         parse_recurrence_field,
@@ -381,6 +384,28 @@ fn parse_clock_time(input: &mut &str) -> ModalResult<String> {
     }
 }
 
+/// Parse a bare time of day (`H:MM`/`HH:MM`).
+///
+/// The mirror of [`parse_clock_time`]: a time may be written with its clock
+/// face or without one, and in both spellings it is a metadata item that
+/// attaches to the nearest due, scheduled or start date - in either order.
+///
+/// The input is left untouched when the text is not a time of day.
+fn parse_bare_time(input: &mut &str) -> ModalResult<String> {
+    let start = *input;
+    let mut trimmed = input.trim_start();
+    match take_time_value(&mut trimmed) {
+        Some(value) => {
+            *input = trimmed;
+            Ok(value)
+        }
+        None => {
+            *input = start;
+            Err(ErrMode::Backtrack(ContextError::new()))
+        }
+    }
+}
+
 /// Whether `s` starts with a clock-face emoji, optionally followed by the
 /// variation selector.
 fn starts_clock_face(s: &str) -> bool {
@@ -389,6 +414,15 @@ fn starts_clock_face(s: &str) -> bool {
         return false;
     };
     matches!(first, CLOCK_FACE_FIRST..=CLOCK_FACE_LAST)
+}
+
+/// Whether `s` starts with a bare time of day (`H:MM`/`HH:MM`).
+///
+/// A bare time is a metadata item like a clock-face time: it belongs to the
+/// date next to it, not to the prose around it.
+fn starts_bare_time(s: &str) -> bool {
+    let mut rest = s;
+    take_time_value(&mut rest).is_some()
 }
 
 /// Consume a clock-face emoji, reporting whether one was there.
@@ -1028,6 +1062,24 @@ mod tests {
         let task = parse_task_line("- [ ] Take out the trash 📅 2026-11-14 1:20 #task").unwrap();
         assert_eq!(task.description, "Take out the trash");
         assert_eq!(task.due.as_deref(), Some("2026-11-14"));
+        assert_eq!(task.due_time.as_deref(), Some("01:20"));
+        assert_eq!(task.tags, vec!["task".to_string()]);
+    }
+
+    #[test]
+    fn parses_a_bare_time_after_a_tag() {
+        let task = parse_task_line("- [ ] Take out the trash 📅 2026-11-07 #task 1:20").unwrap();
+        assert_eq!(task.description, "Take out the trash");
+        assert_eq!(task.due.as_deref(), Some("2026-11-07"));
+        assert_eq!(task.due_time.as_deref(), Some("01:20"));
+        assert_eq!(task.tags, vec!["task".to_string()]);
+    }
+
+    #[test]
+    fn parses_a_bare_time_before_a_date() {
+        let task = parse_task_line("- [ ] Take out the trash 1:20 📅 2026-11-07 #task").unwrap();
+        assert_eq!(task.description, "Take out the trash");
+        assert_eq!(task.due.as_deref(), Some("2026-11-07"));
         assert_eq!(task.due_time.as_deref(), Some("01:20"));
         assert_eq!(task.tags, vec!["task".to_string()]);
     }
