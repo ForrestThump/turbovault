@@ -1087,6 +1087,9 @@ mod tests {
         assert_eq!(task.recurrence.as_deref(), Some("every weekday"));
         assert_eq!(task.on_completion.as_deref(), Some("delete"));
         assert_eq!(task.id.as_deref(), Some("pr-123"));
+        assert_eq!(task.due_time.as_deref(), Some("09:00"));
+        assert!(task.scheduled_time.is_none());
+        assert!(task.start_time.is_none());
         assert_eq!(
             task.depends_on,
             vec!["abc123".to_string(), "def456".to_string()]

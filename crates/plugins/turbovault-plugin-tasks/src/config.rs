@@ -348,6 +348,28 @@ mod tests {
             .unwrap()
     }
 
+    /// The raw path is a *token* match too: a longer token such as `#tasks`,
+    /// `#taskforce` or `#task/sub` is a different tag and must not pass the
+    /// filter, even when the trailing text keeps the tag out of the parsed
+    /// tags.
+    #[test]
+    fn rejects_a_longer_tag_token_on_the_raw_path() {
+        let config = task_filter_config();
+
+        assert!(!config.accepts(&task_line("- [ ] Grouped #taskforce — see [[X]]")));
+        assert!(!config.accepts(&task_line("- [ ] Grouped #task/sub — see [[X]]")));
+        assert!(!config.accepts(&task_line("- [ ] Grouped #tasks — see [[X]]")));
+    }
+
+    /// The control for the case above: the very same shape with the filter tag
+    /// itself is accepted, whatever its case.
+    #[test]
+    fn accepts_the_filter_tag_token_on_the_raw_path() {
+        let config = task_filter_config();
+
+        assert!(config.accepts(&task_line("- [ ] Real #Task — see [[X]]")));
+    }
+
     #[test]
     fn accepts_a_task_whose_filter_tag_is_followed_by_trailing_text() {
         let config = task_filter_config();
