@@ -85,16 +85,23 @@ other filter is a case-insensitive substring of the description.
 ## Times of day
 
 The parser understands Forrest's clock-time convention: a clock-face emoji plus
-a time (`🕘 09:00`, `🕖 19:00`, `🕛 12:00`) or a bare time directly after a date
-(`📅 2026-11-14 1:20`). A time never clears the date next to it — it is
+a time (`🕘 09:00`, `🕖 19:00`, `🕛 12:00`) or a bare time (`📅 2026-11-14 1:20`,
+`📅 2026-11-07 #task 1:20`). A time never clears the date next to it — it is
 attached to the due, scheduled or start date it belongs to, before or after it,
 and surfaces additively as `due_time` / `scheduled_time` / `start_time` (`null`
 when the task carries no time). The date fields themselves are unchanged:
 `due_date` stays a plain `YYYY-MM-DD` calendar date.
 
+A bare time is a metadata item like a clock-face time: it attaches to the
+nearest date, in either order. It only counts as metadata when the line
+carries a date as well — a time in prose (`Meet at 9:00 with the team`) stays
+in the description.
+
 In the emoji dialect a time is written back behind the twelve-hour clock face
 that matches the hour (`📅 2026-11-07 🕖 19:00`); in the Dataview dialect it is
-an inline field of its own (`[due:: 2026-11-07] [dueTime:: 19:00]`).
+an inline field of its own (`[due:: 2026-11-07] [dueTime:: 19:00]`). A time
+that has no date is written on its own (`🕖 19:00`, `[dueTime:: 19:00]`)
+rather than dropped.
 
 > **Note:** `VaultApi::read_config` is a fork-local addition to the plugin API
 > (a non-breaking default method, `None` where a host declines it). It is the
