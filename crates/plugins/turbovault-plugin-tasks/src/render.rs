@@ -132,6 +132,9 @@ fn scalar(format: TaskFormat, emoji: &str, key: &str, value: &str) -> String {
 /// A time of day is written the way the vault writes it: in the emoji dialect
 /// it follows the date behind its clock face (`📅 2026-11-07 🕘 09:00`), in
 /// the Dataview dialect it is an inline field of its own (`[dueTime:: 09:00]`).
+///
+/// A time without a date is still a time: it is rendered on its own, so that
+/// re-rendering a task never drops it.
 fn dated(
     format: TaskFormat,
     emoji: &str,
@@ -139,16 +142,17 @@ fn dated(
     date: Option<jiff::civil::Date>,
     time: Option<&str>,
 ) -> Option<String> {
-    let date = date?;
-    match (format, time) {
-        (TaskFormat::Emoji, Some(time)) => {
-            Some(format!("{emoji} {date} {} {time}", clock_face(time)))
-        }
-        (TaskFormat::Emoji, None) => Some(scalar(format, emoji, key, &date.to_string())),
-        (TaskFormat::Dataview, Some(time)) => {
-            Some(format!("[{}:: {date}] [{}Time:: {time}]", key, key))
-        }
-        (TaskFormat::Dataview, None) => Some(scalar(format, emoji, key, &date.to_string())),
+    match (date, time) {
+        (Some(date), Some(time)) => match format {
+            TaskFormat::Emoji => Some(format!("{emoji} {date} {} {time}", clock_face(time))),
+            TaskFormat::Dataview => Some(format!("[{}:: {date}] [{}Time:: {time}]", key, key)),
+        },
+        (Some(date), None) => Some(scalar(format, emoji, key, &date.to_string())),
+        (None, Some(time)) => Some(match format {
+            TaskFormat::Emoji => format!("{} {time}", clock_face(time)),
+            TaskFormat::Dataview => format!("[{key}Time:: {time}]"),
+        }),
+        (None, None) => None,
     }
 }
 
@@ -325,6 +329,7 @@ mod tests {
             "- [ ] Bare description with no metadata",
             "- [ ] Cancel SuperGrok subscription 📅 2026-11-07 🕘 09:00 #task #finance",
             "- [ ] Take out the trash 📅 2026-11-14 1:20 #task",
+            "- [ ] Standup 🕘 09:00 #task",
         ] {
             assert_round_trips(line, TaskFormat::Emoji);
         }
@@ -337,6 +342,7 @@ mod tests {
             "- [x] Ship it [completion:: 2026-07-01] [repeat:: every month]",
             "- [ ] Custom [project:: [[Team Work]]] [due:: 2026-05-20]",
             "- [ ] Cancel SuperGrok subscription [due:: 2026-11-07] [dueTime:: 09:00] #task",
+            "- [ ] Standup [dueTime:: 09:00] #task",
         ] {
             assert_round_trips(line, TaskFormat::Dataview);
         }
@@ -369,6 +375,28 @@ mod tests {
         assert_eq!(
             to_markdown_line(&task, TaskFormat::Emoji),
             "- [ ] Call the clinic 📅 2026-11-07 🕖 19:00"
+        );
+    }
+
+    /// A time of day is worth keeping even when there is no date to hang it
+    /// on: the renderer must not drop it on the way out.
+    #[test]
+    fn renders_a_time_that_has_no_date() {
+        let task = parse_tasks("- [ ] Standup [dueTime:: 09:00] #task")
+            .into_iter()
+            .next()
+            .unwrap();
+
+        assert!(task.due_date.is_none());
+        assert_eq!(task.due_time.as_deref(), Some("09:00"));
+
+        assert_eq!(
+            to_markdown_line(&task, TaskFormat::Dataview),
+            "- [ ] Standup [dueTime:: 09:00] #task"
+        );
+        assert_eq!(
+            to_markdown_line(&task, TaskFormat::Emoji),
+            "- [ ] Standup 🕘 09:00 #task"
         );
     }
 
