@@ -53,13 +53,31 @@ pub fn render_body(task: &TaskItem, format: TaskFormat) -> String {
         parts.push(scalar(format, "🔁", "repeat", recurrence));
     }
 
-    parts.extend(dated(format, "➕", "created", task.created_date));
-    parts.extend(dated(format, "🛫", "start", task.start_date));
-    parts.extend(dated(format, "⏳", "scheduled", task.scheduled_date));
-    parts.extend(dated(format, "📅", "due", task.due_date));
-    parts.extend(dated(format, "❌", "cancelled", task.cancelled_date));
+    parts.extend(dated(format, "➕", "created", task.created_date, None));
+    parts.extend(dated(
+        format,
+        "🛫",
+        "start",
+        task.start_date,
+        task.start_time.as_deref(),
+    ));
+    parts.extend(dated(
+        format,
+        "⏳",
+        "scheduled",
+        task.scheduled_date,
+        task.scheduled_time.as_deref(),
+    ));
+    parts.extend(dated(
+        format,
+        "📅",
+        "due",
+        task.due_date,
+        task.due_time.as_deref(),
+    ));
+    parts.extend(dated(format, "❌", "cancelled", task.cancelled_date, None));
     // `completion` is the Tasks plugin's canonical dataview key for the done date.
-    parts.extend(dated(format, "✅", "completion", task.done_date));
+    parts.extend(dated(format, "✅", "completion", task.done_date, None));
 
     if let Some(on_completion) = &task.on_completion {
         parts.push(scalar(format, "🏁", "onCompletion", on_completion));
@@ -110,13 +128,63 @@ fn scalar(format: TaskFormat, emoji: &str, key: &str, value: &str) -> String {
 }
 
 /// An optional date field, rendered only when present.
+///
+/// A time of day is written the way the vault writes it: in the emoji dialect
+/// it follows the date behind its clock face (`📅 2026-11-07 🕘 09:00`), in
+/// the Dataview dialect it is an inline field of its own (`[dueTime:: 09:00]`).
+///
+/// A time without a date is still a time: it is rendered on its own, so that
+/// re-rendering a task never drops it. It is written as an inline field in
+/// *both* dialects, because a clock face with no date next to it is
+/// description text for the parser (`🕘 09:00` stays in the description) and
+/// would therefore neither round-trip nor keep the description clean.
 fn dated(
     format: TaskFormat,
     emoji: &str,
     key: &str,
     date: Option<jiff::civil::Date>,
+    time: Option<&str>,
 ) -> Option<String> {
-    date.map(|date| scalar(format, emoji, key, &date.to_string()))
+    match (date, time) {
+        (Some(date), Some(time)) => match format {
+            TaskFormat::Emoji => Some(format!("{emoji} {date} {} {time}", clock_face(time))),
+            TaskFormat::Dataview => Some(format!("[{}:: {date}] [{}Time:: {time}]", key, key)),
+        },
+        (Some(date), None) => Some(scalar(format, emoji, key, &date.to_string())),
+        (None, Some(time)) => Some(format!("[{key}Time:: {time}]")),
+        (None, None) => None,
+    }
+}
+
+/// The clock-face emoji for a time of day, e.g. `09:00` → `🕘`.
+///
+/// Times are written in the vault with the twelve-hour clock face that matches
+/// the hour (`🕖 19:00`), and the renderer reproduces that spelling.
+fn clock_face(time: &str) -> &'static str {
+    /// The o'clock faces, indexed by the hour modulo twelve.
+    const OCLOCK: [&str; 12] = [
+        "🕛", "🕐", "🕑", "🕒", "🕓", "🕔", "🕕", "🕖", "🕗", "🕘", "🕙", "🕚",
+    ];
+    /// The half-past faces, indexed by the hour modulo twelve.
+    const HALF_PAST: [&str; 12] = [
+        "🕧", "🕜", "🕝", "🕞", "🕟", "🕠", "🕡", "🕢", "🕣", "🕤", "🕥", "🕦",
+    ];
+
+    let mut fields = time.split(':');
+    let hour: u32 = fields
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let minute: u32 = fields
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let index = (hour % 12) as usize;
+    if minute == 30 {
+        HALF_PAST[index]
+    } else {
+        OCLOCK[index]
+    }
 }
 
 /// Standard Tasks metadata keys (as the parser normalizes them). These are
@@ -138,6 +206,9 @@ fn is_standard_key(key: &str) -> bool {
             | "id"
             | "dependson"
             | "priority"
+            | "duetime"
+            | "scheduledtime"
+            | "starttime"
     )
 }
 
@@ -216,6 +287,18 @@ mod tests {
             original.block_ref, reparsed.block_ref,
             "block_ref ({rendered:?})"
         );
+        assert_eq!(
+            original.due_time, reparsed.due_time,
+            "due_time ({rendered:?})"
+        );
+        assert_eq!(
+            original.scheduled_time, reparsed.scheduled_time,
+            "scheduled_time ({rendered:?})"
+        );
+        assert_eq!(
+            original.start_time, reparsed.start_time,
+            "start_time ({rendered:?})"
+        );
         // Standard fields are compared via the typed fields above; the parser
         // also mirrors them into `metadata` under whatever alias the author used
         // (e.g. `completion` vs `done`), which is redundant and not semantically
@@ -244,6 +327,11 @@ mod tests {
             "- [-] Dropped 📅 2026-05-15",
             "- [ ] Blocked 🏁 keep 🆔 dcf64c ⛔ abc123,def456",
             "- [ ] Bare description with no metadata",
+            "- [ ] Cancel SuperGrok subscription 📅 2026-11-07 🕘 09:00 #task #finance",
+            "- [ ] Take out the trash 📅 2026-11-14 1:20 #task",
+            // A time with no date has no clock-face spelling that survives a
+            // re-parse, so it is written as an inline field here too.
+            "- [ ] Standup [dueTime:: 09:00] #task",
         ] {
             assert_round_trips(line, TaskFormat::Emoji);
         }
@@ -255,8 +343,112 @@ mod tests {
             "- [ ] Finish report [due:: 2026-06-01] [priority:: high] #work",
             "- [x] Ship it [completion:: 2026-07-01] [repeat:: every month]",
             "- [ ] Custom [project:: [[Team Work]]] [due:: 2026-05-20]",
+            "- [ ] Cancel SuperGrok subscription [due:: 2026-11-07] [dueTime:: 09:00] #task",
+            "- [ ] Standup [dueTime:: 09:00] #task",
         ] {
             assert_round_trips(line, TaskFormat::Dataview);
+        }
+    }
+
+    /// A time of day is written back the way the vault writes it: behind the
+    /// twelve-hour clock face that matches the hour.
+    #[test]
+    fn renders_a_clock_time_next_to_its_date() {
+        let task = parse_tasks("- [ ] Cancel SuperGrok subscription 📅 2026-11-07 🕘 09:00 #task")
+            .into_iter()
+            .next()
+            .unwrap();
+
+        assert_eq!(task.due_time.as_deref(), Some("09:00"));
+        assert_eq!(
+            to_markdown_line(&task, TaskFormat::Emoji),
+            "- [ ] Cancel SuperGrok subscription 📅 2026-11-07 🕘 09:00 #task"
+        );
+    }
+
+    #[test]
+    fn renders_an_evening_clock_time_with_its_twelve_hour_face() {
+        let task = parse_tasks("- [ ] Call the clinic 📅 2026-11-07 🕖 19:00")
+            .into_iter()
+            .next()
+            .unwrap();
+
+        assert_eq!(task.due_time.as_deref(), Some("19:00"));
+        assert_eq!(
+            to_markdown_line(&task, TaskFormat::Emoji),
+            "- [ ] Call the clinic 📅 2026-11-07 🕖 19:00"
+        );
+    }
+
+    /// A time of day is worth keeping even when there is no date to hang it
+    /// on: the renderer must not drop it on the way out.
+    #[test]
+    fn renders_a_time_that_has_no_date() {
+        let task = parse_tasks("- [ ] Standup [dueTime:: 09:00] #task")
+            .into_iter()
+            .next()
+            .unwrap();
+
+        assert!(task.due_date.is_none());
+        assert_eq!(task.due_time.as_deref(), Some("09:00"));
+
+        assert_eq!(
+            to_markdown_line(&task, TaskFormat::Dataview),
+            "- [ ] Standup [dueTime:: 09:00] #task"
+        );
+        assert_eq!(
+            to_markdown_line(&task, TaskFormat::Emoji),
+            "- [ ] Standup [dueTime:: 09:00] #task"
+        );
+    }
+
+    /// A clock face with no date next to it is description text, not metadata:
+    /// the parser keeps `🕘 09:00` in the description unless a date carries
+    /// it. A date-less time is therefore written as an inline field in *both*
+    /// dialects, so that it survives the round trip through the emoji dialect
+    /// instead of being dropped or leaking into the description.
+    #[test]
+    fn renders_a_date_less_time_as_an_inline_field_in_the_emoji_dialect() {
+        let task = parse_tasks("- [ ] Standup [dueTime:: 09:00] #task")
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(task.due_time.as_deref(), Some("09:00"));
+
+        let rendered = to_markdown_line(&task, TaskFormat::Emoji);
+        assert!(rendered.contains("[dueTime:: 09:00]"), "{rendered}");
+
+        let reparsed = parse_tasks(&rendered).into_iter().next().unwrap();
+        assert_eq!(reparsed.due_time.as_deref(), Some("09:00"));
+        assert_eq!(reparsed.content, "Standup");
+    }
+
+    /// Every date-less time is written the same way, whichever date it would
+    /// have belonged to.
+    #[test]
+    fn renders_every_date_less_time_as_an_inline_field() {
+        for (key, line) in [
+            ("dueTime", "- [ ] Standup [dueTime:: 09:00] #task"),
+            (
+                "scheduledTime",
+                "- [ ] Standup [scheduledTime:: 09:00] #task",
+            ),
+            ("startTime", "- [ ] Standup [startTime:: 09:00] #task"),
+        ] {
+            let task = parse_tasks(line).into_iter().next().unwrap();
+            let rendered = to_markdown_line(&task, TaskFormat::Emoji);
+            let inline = format!("[{key}:: 09:00]");
+            assert!(rendered.contains(&inline), "{rendered}");
+
+            let reparsed = parse_tasks(&rendered).into_iter().next().unwrap();
+            assert_eq!(reparsed.content, "Standup", "{rendered}");
+            let time = match key {
+                "dueTime" => reparsed.due_time.as_deref(),
+                "scheduledTime" => reparsed.scheduled_time.as_deref(),
+                "startTime" => reparsed.start_time.as_deref(),
+                other => unreachable!("unexpected key {other}"),
+            };
+            assert_eq!(time, Some("09:00"), "{rendered}");
         }
     }
 

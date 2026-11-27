@@ -73,9 +73,37 @@ let open: Vec<_> = turbovault_parser::parse_tasks(note)
 ```
 
 `TasksConfig::accepts` matches a `#tag` filter as a case-insensitive tag token
-(`#task` matches `#Task`, not `#tasks` or `#taskforce`). Any other filter is a
-case-insensitive substring of the description. `TasksConfig::display_text`
-removes that filter from the description when `removeGlobalFilter` is set.
+(`#task` matches `#Task`, not `#tasks` or `#taskforce`). The token is looked for
+in the parsed tags *and* in the task text itself, because the Tasks plugin
+checks the global filter against the raw task body before it parses the
+signifiers: a task whose trailing text (`— see [[Some Note]]`) keeps the rest of
+the line from being parsed as metadata still carries its `#tag` filter. Any
+other filter is a case-insensitive substring of the description.
+`TasksConfig::display_text` removes that filter from the description when
+`removeGlobalFilter` is set.
+
+## Times of day
+
+The parser understands Forrest's clock-time convention: a clock-face emoji plus
+a time (`🕘 09:00`, `🕖 19:00`, `🕛 12:00`) or a bare time (`📅 2026-11-14 1:20`,
+`📅 2026-11-07 #task 1:20`). A time never clears the date next to it — it is
+attached to the due, scheduled or start date it belongs to, before or after it,
+and surfaces additively as `due_time` / `scheduled_time` / `start_time` (`null`
+when the task carries no time). The date fields themselves are unchanged:
+`due_date` stays a plain `YYYY-MM-DD` calendar date.
+
+A bare time is a metadata item like a clock-face time: it attaches to the
+nearest date, in either order. It only counts as metadata when the line
+carries a date as well — a time in prose (`Meet at 9:00 with the team`) stays
+in the description.
+
+In the emoji dialect a time is written back behind the twelve-hour clock face
+that matches the hour (`📅 2026-11-07 🕖 19:00`); in the Dataview dialect it is
+an inline field of its own (`[due:: 2026-11-07] [dueTime:: 19:00]`). A time
+that has no date is written as an inline field of its own in both dialects
+(`[dueTime:: 19:00]`) rather than dropped: a clock face with no date next to
+it is description text for the parser (`🕘 19:00` stays in the description),
+so it could not survive the round trip.
 
 > **Note:** `VaultApi::read_config` is a fork-local addition to the plugin API
 > (a non-breaking default method, `None` where a host declines it). It is the

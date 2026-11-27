@@ -130,8 +130,13 @@ impl TasksConfig {
     /// Whether `task` survives the global filter.
     ///
     /// No filter accepts every task. A `#tag` filter matches that tag token on
-    /// `task.tags`, case-insensitively (`#task` does not match `#tasks`). Any
-    /// other filter is a case-insensitive substring of the task description.
+    /// `task.tags`, case-insensitively (`#task` does not match `#tasks`). It
+    /// also matches a whitespace-delimited `#tag` token in the task text
+    /// itself, because the Tasks plugin checks the global filter against the
+    /// raw task body *before* it parses the signifiers: a task whose trailing
+    /// text keeps the rest of the line from being parsed as metadata still
+    /// carries its `#tag` filter. Any other filter is a case-insensitive
+    /// substring of the task description.
     #[must_use]
     pub fn accepts(&self, task: &TaskItem) -> bool {
         let Some(filter) = &self.global_filter else {
@@ -144,6 +149,7 @@ impl TasksConfig {
             task.tags
                 .iter()
                 .any(|value| value.eq_ignore_ascii_case(tag))
+                || contains_tag_token(&task.content, tag)
         } else {
             task.content
                 .to_ascii_lowercase()
@@ -186,6 +192,16 @@ fn strip_tag_token(content: &str, tag: &str) -> String {
         .filter(|token| !token.eq_ignore_ascii_case(&needle))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Whether `content` carries a whitespace-delimited `#tag` token.
+///
+/// A longer token such as `#tasks` or `#task/sub` does not match.
+fn contains_tag_token(content: &str, tag: &str) -> bool {
+    let needle = format!("#{tag}");
+    content
+        .split_whitespace()
+        .any(|token| token.eq_ignore_ascii_case(&needle))
 }
 
 /// Remove every case-insensitive occurrence of `needle`. ASCII case folding
@@ -321,6 +337,164 @@ mod tests {
         assert!(!config.accepts(&task_line("- [ ] Grouped #tasks")));
         assert!(!config.accepts(&task_line("- [ ] Force #taskforce")));
         assert!(!config.accepts(&task_line("- [ ] Mention the word task in prose")));
+    }
+
+    /// The Tasks plugin checks the global filter against the *raw* task body,
+    /// before any signifiers are parsed. A `#tag` filter therefore matches a
+    /// whitespace-delimited `#tag` token even when the trailing text keeps the
+    /// rest of the line from being parsed as metadata.
+    fn task_filter_config() -> TasksConfig {
+        TasksConfig::from_obsidian_data(br##"{"globalFilter":"#task","removeGlobalFilter":false}"##)
+            .unwrap()
+    }
+
+    /// The raw path is a *token* match too: a longer token such as `#tasks`,
+    /// `#taskforce` or `#task/sub` is a different tag and must not pass the
+    /// filter, even when the trailing text keeps the tag out of the parsed
+    /// tags.
+    #[test]
+    fn rejects_a_longer_tag_token_on_the_raw_path() {
+        let config = task_filter_config();
+
+        assert!(!config.accepts(&task_line("- [ ] Grouped #taskforce — see [[X]]")));
+        assert!(!config.accepts(&task_line("- [ ] Grouped #task/sub — see [[X]]")));
+        assert!(!config.accepts(&task_line("- [ ] Grouped #tasks — see [[X]]")));
+        // The longer tokens are not the filter tag, and the trailing text
+        // keeps them out of the parsed tags as well: these negatives stay on
+        // the raw path.
+        for line in [
+            "- [ ] Grouped #taskforce — see [[X]]",
+            "- [ ] Grouped #task/sub — see [[X]]",
+            "- [ ] Grouped #tasks — see [[X]]",
+        ] {
+            let task = task_line(line);
+            assert!(task.tags.is_empty(), "{line}");
+        }
+    }
+
+    /// The control for the case above: the very same shape with the filter tag
+    /// itself is accepted, whatever its case.
+    #[test]
+    fn accepts_the_filter_tag_token_on_the_raw_path() {
+        let config = task_filter_config();
+
+        assert!(config.accepts(&task_line("- [ ] Real #Task — see [[X]]")));
+    }
+
+    #[test]
+    fn accepts_a_task_whose_filter_tag_is_followed_by_trailing_text() {
+        let config = task_filter_config();
+        let task = task_line(
+            "- [ ] Order eyeglasses 📅 2026-12-31 #task #health #personal — see [[Glasses Research Summary]]",
+        );
+
+        assert!(config.accepts(&task));
+    }
+
+    #[test]
+    fn accepts_a_completed_task_whose_filter_tag_is_followed_by_trailing_text() {
+        let config = task_filter_config();
+        let task = task_line(
+            "- [x] Talk to Sarah about an Idaho trip, then text Matt Madero after 📅 2026-10-12 🕖 19:00 #task #personal #work — see [[Tasks/Sarah]] ✅ 2026-10-24",
+        );
+
+        assert!(config.accepts(&task));
+        assert!(task.is_completed);
+        assert_eq!(
+            task.done_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-10-24")
+        );
+    }
+
+    #[test]
+    fn accepts_a_task_with_a_clock_time_and_keeps_its_due_date() {
+        let config = task_filter_config();
+        let task = task_line(
+            "- [ ] Cancel SuperGrok subscription 📅 2026-11-07 🕘 09:00 #task #finance #personal-admin",
+        );
+
+        assert!(config.accepts(&task));
+        assert_eq!(
+            task.due_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-11-07")
+        );
+        assert_eq!(
+            task.tags,
+            vec![
+                "task".to_string(),
+                "finance".to_string(),
+                "personal-admin".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn accepts_a_task_whose_clock_time_follows_its_tags() {
+        let config = task_filter_config();
+        let task = task_line("- [ ] Take out the trash 📅 2026-11-07 #task 🕘 09:00");
+
+        assert!(config.accepts(&task));
+        assert_eq!(
+            task.due_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-11-07")
+        );
+    }
+
+    #[test]
+    fn accepts_a_task_with_a_bare_time_after_its_date() {
+        let config = task_filter_config();
+        let task = task_line("- [ ] Take out the trash 📅 2026-11-14 1:20 #task");
+
+        assert!(config.accepts(&task));
+        assert_eq!(
+            task.due_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-11-14")
+        );
+    }
+
+    #[test]
+    fn accepts_a_task_whose_nested_bullet_does_not_hide_it() {
+        let config = task_filter_config();
+        let tasks = turbovault_parser::parse_tasks(
+            "- [ ] Order eyeglasses 📅 2026-12-31 #task #health #personal\n    - 📝 Prescription is somewhere in the house",
+        );
+
+        assert_eq!(tasks.len(), 1);
+        assert!(config.accepts(&tasks[0]));
+        assert_eq!(
+            tasks[0].due_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-12-31")
+        );
+        assert!(tasks[0].tags.iter().any(|tag| tag == "task"));
+    }
+
+    #[test]
+    fn accepts_a_task_whose_final_tag_is_parsed() {
+        let config = task_filter_config();
+        let task = task_line("- [ ] Order eyeglasses 📅 2026-12-31 — see [[Glasses]] #task");
+
+        assert!(config.accepts(&task));
+        assert_eq!(task.tags, vec!["task".to_string()]);
+    }
+
+    #[test]
+    fn control_task_without_trailing_text_keeps_its_due_date_and_tags() {
+        let config = task_filter_config();
+        let task = task_line("- [ ] Order eyeglasses 📅 2026-12-31 #task #health #personal");
+
+        assert!(config.accepts(&task));
+        assert_eq!(
+            task.due_date.map(|date| date.to_string()).as_deref(),
+            Some("2026-12-31")
+        );
+        assert_eq!(
+            task.tags,
+            vec![
+                "task".to_string(),
+                "health".to_string(),
+                "personal".to_string()
+            ]
+        );
     }
 
     #[test]
